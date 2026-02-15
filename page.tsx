@@ -1,9 +1,10 @@
 "use client";
 
+
 import React, { useState, useCallback, useMemo, useEffect } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
-import { supabase } from "@/lib/supabase"; // Import connection
+import { supabase } from "../lib/supabase";
 import {
   LineChart, Line, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Label
 } from "recharts";
