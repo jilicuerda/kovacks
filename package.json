@@ -2,12 +2,12 @@
   "name": "kovaaks-local",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
+"scripts": {
+  "dev": "next dev",
+  "build": "next build --no-lint",  <-- ADD THIS FLAG
+  "start": "next start",
+  "lint": "next lint"
+},
   "dependencies": {
     "lodash": "^4.17.23",
     "lucide-react": "^0.564.0",
