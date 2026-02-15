@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useMemo, useEffect } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
-import { createClient } from "@supabase/supabase-js"; // Direct Import
+import { createClient } from "@supabase/supabase-js"; // <--- THIS is the correct import
 import {
   LineChart, Line, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Label
 } from "recharts";
