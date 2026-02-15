@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useMemo, useEffect } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
-import { supabase } from "@/lib/supabase"; // Import connection
+import { createClient } from "@supabase/supabase-js"; // Import directly
 import {
   LineChart, Line, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Label
 } from "recharts";
@@ -11,6 +11,11 @@ import {
   UploadCloud, FileText, TrendingUp, Trophy, 
   Crosshair, Timer, Monitor, Activity, BatteryCharging, Shuffle, LogIn, LogOut, Cloud
 } from "lucide-react";
+
+// --- Database Connection (Inlined) ---
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- Types ---
 type KovaaksDataPoint = {
@@ -42,14 +47,12 @@ export default function KovaaksTracker() {
 
   // --- Auth & Init ---
   useEffect(() => {
-    // Check if user is already logged in
     const checkUser = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       setUser(user);
     };
     checkUser();
 
-    // Listen for auth changes
     const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
        setUser(session?.user ?? null);
     });
@@ -82,9 +85,8 @@ export default function KovaaksTracker() {
 
     setIsSyncing(true);
     
-    // Flatten stats into one array for upload
     const allStats = Object.values(stats).flat().map(s => ({
-       user_id: user.id, // Important: RLS requires this
+       user_id: user.id,
        scenario: s.scenario,
        score: s.score,
        accuracy: s.accuracy,
@@ -94,7 +96,6 @@ export default function KovaaksTracker() {
        played_at: s.date
     }));
 
-    // Upload in batches of 100 to avoid limits
     const BATCH_SIZE = 100;
     let errorCount = 0;
 
@@ -111,7 +112,6 @@ export default function KovaaksTracker() {
     if (errorCount === 0) alert("Successfully synced all stats to the cloud!");
     else alert(`Sync finished with some errors. Check console.`);
   };
-
 
   // --- Helpers ---
   const parseFileName = (fileName: string) => {
@@ -653,6 +653,41 @@ export default function KovaaksTracker() {
                      <p className="text-xl md:text-2xl font-mono font-bold text-white">
                        {currentScenarioData.length}
                      </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Personal Bests Table (Always shows Score PBs) */}
+              {selectedScenario && (
+                <div className="bg-neutral-900/50 border border-neutral-800 rounded-xl p-6">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Trophy className="w-4 h-4 text-yellow-500" />
+                    <h4 className="text-sm font-bold text-neutral-300 uppercase tracking-wider">Top 5 Records (By Score)</h4>
+                  </div>
+                  <div className="space-y-2">
+                    {personalBests.map((run, idx) => (
+                      <div key={run.id} className="flex justify-between items-center bg-neutral-950/50 px-4 py-3 rounded-lg border border-neutral-800/50 hover:border-neutral-700 transition-colors">
+                        <div className="flex items-center gap-4">
+                          <span className={`text-xs font-bold w-6 h-6 flex items-center justify-center rounded ${
+                            idx === 0 ? 'bg-yellow-500/20 text-yellow-500' : 'bg-neutral-800 text-neutral-600'
+                          }`}>
+                            #{idx + 1}
+                          </span>
+                          <span className="text-neutral-400 text-sm font-mono">
+                             {run.date.split("T")[0]}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-6">
+                            <span className="text-xs text-neutral-500 font-mono hidden md:block">
+                                {run.accuracy.toFixed(1)}% Acc
+                            </span>
+                             <span className={`text-xs font-mono hidden md:block ${run.fatigue < 90 ? 'text-red-400' : 'text-emerald-400'}`}>
+                                {run.fatigue > 0 ? `${run.fatigue.toFixed(0)}% Stm` : '-'}
+                            </span>
+                            <span className="font-mono text-white font-bold w-20 text-right">{run.score.toLocaleString()}</span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
