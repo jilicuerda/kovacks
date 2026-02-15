@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useMemo, useEffect } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
-import { createClient } from "@supabase/supabase-js"; // Import directly
+import { createClient } from "@supabase/supabase-js"; // Direct Import
 import {
   LineChart, Line, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Label
 } from "recharts";
@@ -12,12 +12,13 @@ import {
   Crosshair, Timer, Monitor, Activity, BatteryCharging, Shuffle, LogIn, LogOut, Cloud
 } from "lucide-react";
 
-// --- Database Connection (Inlined) ---
+// --- 1. DATABASE CONNECTION (INLINED) ---
+// We create the connection right here so we don't need a separate file
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// --- Types ---
+// --- 2. TYPES ---
 type KovaaksDataPoint = {
   id: string;
   date: string;
@@ -45,7 +46,7 @@ export default function KovaaksTracker() {
   const [showLogin, setShowLogin] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // --- Auth & Init ---
+  // --- 3. AUTH LOGIC ---
   useEffect(() => {
     const checkUser = async () => {
       const { data: { user } } = await supabase.auth.getUser();
@@ -78,13 +79,14 @@ export default function KovaaksTracker() {
     await supabase.auth.signOut();
   };
 
-  // --- Sync Logic ---
+  // --- 4. CLOUD SYNC LOGIC ---
   const handleSyncToCloud = async () => {
     if (!user) return alert("You must be logged in to sync.");
     if (Object.keys(stats).length === 0) return alert("No stats to sync.");
 
     setIsSyncing(true);
     
+    // Convert our stats object into a flat list for the database
     const allStats = Object.values(stats).flat().map(s => ({
        user_id: user.id,
        scenario: s.scenario,
@@ -113,7 +115,7 @@ export default function KovaaksTracker() {
     else alert(`Sync finished with some errors. Check console.`);
   };
 
-  // --- Helpers ---
+  // --- 5. PARSING LOGIC ---
   const parseFileName = (fileName: string) => {
     const cleanName = fileName.replace(".csv", "").replace(" Stats", "");
     const parts = cleanName.split(" - ");
@@ -292,7 +294,6 @@ export default function KovaaksTracker() {
     e.preventDefault();
   };
 
-  // --- Derived Data ---
   const sortedScenarios = useMemo(() => {
     return Object.keys(stats).sort((a, b) => stats[b].length - stats[a].length);
   }, [stats]);
