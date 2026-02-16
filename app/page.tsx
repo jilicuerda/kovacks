@@ -127,17 +127,8 @@ export default function KovaaksTracker() {
     setIsSyncing(false);
   };
 
-  // --- 5. FILE PARSING LOGIC (BRUTE FORCE VERSION) ---
-  const finalizeProcessing = (results: ParsedResults) => {
-    Object.keys(results).forEach(key => {
-        results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    });
-    console.log("Parsed Stats Final:", results);
-    setStats(prev => ({ ...prev, ...results }));
-    setIsProcessing(false);
-  };
-
-  const processFiles = (files: File[]) => {
+  // --- 5. FILE PARSING LOGIC (HYBRID TEXT PARSER) ---
+  const processFiles = async (files: File[]) => {
     console.log(`Starting to process ${files.length} files...`);
     setIsProcessing(true);
     const results: ParsedResults = {};
@@ -148,62 +139,51 @@ export default function KovaaksTracker() {
         return;
     }
 
-    files.forEach(file => {
-      Papa.parse(file, {
-        header: false,
-        skipEmptyLines: true,
-        delimiter: "", // Auto-detect
-        error: (err) => {
-            console.error(`Error parsing ${file.name}:`, err);
-            processedCount++;
-            if (processedCount === files.length) finalizeProcessing(results);
-        },
-        complete: (result) => {
-          try {
-              let rows = result.data as string[][];
-              
-              if (!rows || rows.length === 0) {
-                 return; 
-              }
+    const finalize = () => {
+        Object.keys(results).forEach(key => {
+            results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        });
+        console.log("Parsed Stats Final:", results);
+        setStats(prev => ({ ...prev, ...results }));
+        setIsProcessing(false);
+    };
 
-              // CLEANUP: Handle BOM
-              if (rows[0][0]) {
-                 rows[0][0] = rows[0][0].replace(/^\uFEFF/, '');
-              }
-
-              // 1. Build Data Map with Brute Force Splitting
-              const dataMap: Record<string, string> = {};
-              
-              rows.forEach(row => {
-                let cells = row;
+    for (const file of files) {
+        try {
+            // Read file as raw text first
+            const text = await file.text();
+            
+            // CHECK 1: Is this a "Detailed Stats" file? (Look for keywords at start)
+            if (text.startsWith('Kill #') || text.includes('Kill #,Timestamp')) {
+                // --- STRATEGY: REGEX PARSING (Ignores broken CSV structure) ---
                 
-                // FALLBACK: If row is length 1, manually split by ; or ,
-                if (cells.length === 1 && typeof cells[0] === 'string') {
-                    if (cells[0].includes(';')) cells = cells[0].split(';');
-                    else if (cells[0].includes(',')) cells = cells[0].split(',');
-                }
+                // Extract Scenario
+                // Matches: "Scenario:,PulseShot" or "Scenario: PulseShot"
+                const scenarioMatch = text.match(/Scenario:[,;\s]+(.+)/i);
+                const scenario = scenarioMatch ? scenarioMatch[1].trim() : null;
 
-                if (cells.length >= 2) {
-                  const rawKey = cells[0]?.toString().trim();
-                  const key = rawKey?.replace(':', '').toLowerCase();
-                  const val = cells[1]?.toString().trim();
-                  if (key && val) dataMap[key] = val;
-                }
-              });
+                // Extract Score
+                // Matches: "Score:,888.5" or "Score:,888,5" (French)
+                const scoreMatch = text.match(/Score:[,;\s]+([\d\.,]+)/i);
+                const rawScore = scoreMatch ? scoreMatch[1].replace(',', '.') : '0';
+                const score = parseFloat(rawScore);
 
-              // 2. Detect File Type & Extract
-              
-              // TYPE A: Detailed Stats
-              if (dataMap['scenario'] && dataMap['score']) {
-                const scenario = dataMap['scenario'];
-                const score = parseFloat(dataMap['score'].replace(',', '.')); // French decimal fix
-                
+                // Extract Accuracy components
+                const hitsMatch = text.match(/Hit Count:[,;\s]+(\d+)/i);
+                const missMatch = text.match(/Miss Count:[,;\s]+(\d+)/i);
+                const hits = hitsMatch ? parseInt(hitsMatch[1]) : 0;
+                const misses = missMatch ? parseInt(missMatch[1]) : 0;
                 let accuracy = 0;
-                const hits = parseInt(dataMap['hit count'] || '0');
-                const misses = parseInt(dataMap['miss count'] || '0');
                 if (hits + misses > 0) accuracy = hits / (hits + misses);
 
-                // Date Parsing
+                // Extract TTK / FPS
+                const ttkMatch = text.match(/Avg TTK:[,;\s]+([\d\.,]+)/i);
+                const fpsMatch = text.match(/Avg FPS:[,;\s]+([\d\.,]+)/i);
+                const ttk = ttkMatch ? parseFloat(ttkMatch[1].replace(',', '.')) : 0;
+                const fps = fpsMatch ? parseFloat(fpsMatch[1].replace(',', '.')) : 0;
+
+                // Extract Date from Filename (Most reliable source)
+                // Ex: "PulseShot ... - 2025.11.03-20.05.18 Stats.csv"
                 let date = new Date().toISOString();
                 const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2}).*?(\d{2}\.\d{2}\.\d{2})/);
                 if (nameMatch) {
@@ -221,68 +201,50 @@ export default function KovaaksTracker() {
                     score: score,
                     scenario: scenario,
                     accuracy: accuracy,
-                    ttk: parseFloat((dataMap['avg ttk'] || '0').replace(',', '.')),
-                    fps: parseFloat((dataMap['avg fps'] || '0').replace(',', '.')),
+                    ttk: ttk,
+                    fps: fps,
                     fatigue: 0 
                   });
                 }
-              } 
-              // TYPE B: Summary Stats (Fallback check for single-line manual split)
-              else {
-                 // Check the header row again using the "manual split" logic
-                 let header = rows[0];
-                 if (header.length === 1 && typeof header[0] === 'string') {
-                    if (header[0].includes(';')) header = header[0].split(';');
-                    else if (header[0].includes(',')) header = header[0].split(',');
-                 }
+            } 
+            else {
+                // --- STRATEGY: STANDARD CSV PARSING (For Summary files) ---
+                Papa.parse(text, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: (parseResult) => {
+                        const rows = parseResult.data as any[];
+                        rows.forEach((row) => {
+                            const scenarioName = row['Scenario Name'] || row['Scenario'];
+                            if (!scenarioName) return;
 
-                 if (header[0] && header[0].includes('Scenario Name')) {
-                     const iScenario = header.findIndex(h => h.includes('Scenario Name'));
-                     const iScore = header.findIndex(h => h.includes('Score'));
-                     const iDate = header.findIndex(h => h.includes('Date and Time'));
-                     const iAcc = header.findIndex(h => h.includes('Accuracy'));
-                     const iTTK = header.findIndex(h => h.includes('Time To Kill'));
-                     const iFPS = header.findIndex(h => h.includes('Avg FPS'));
-                     
-                     if (iScenario !== -1 && iScore !== -1) {
-                        for (let i = 1; i < rows.length; i++) {
-                            let row = rows[i];
-                            // Split row if needed
-                            if (row.length === 1 && typeof row[0] === 'string') {
-                                if (row[0].includes(';')) row = row[0].split(';');
-                                else if (row[0].includes(',')) row = row[0].split(',');
-                            }
+                            const rawScore = row['Score'];
+                            const score = parseFloat((rawScore || '0').replace(',', '.'));
+                            const dateStr = row['Date and Time'];
 
-                            if (row[iScenario]) {
-                                const scenarioName = row[iScenario];
-                                const score = parseFloat((row[iScore] || '0').replace(',', '.'));
-
-                                if (!results[scenarioName]) results[scenarioName] = [];
-                                results[scenarioName].push({
-                                    id: Math.random().toString(36).substr(2, 9),
-                                    date: row[iDate] || new Date().toISOString(),
-                                    score: score,
-                                    scenario: scenarioName,
-                                    accuracy: parseFloat((row[iAcc] || '0').replace(',', '.')),
-                                    ttk: parseFloat((row[iTTK] || '0').replace(',', '.')),
-                                    fps: parseFloat((row[iFPS] || '0').replace(',', '.')),
-                                    fatigue: 0
-                                });
-                            }
-                        }
-                     }
-                 }
-              }
-          } catch (e) {
-              console.error("Error processing file:", file.name, e);
-          } finally {
-              processedCount++;
-              if (processedCount % 100 === 0) console.log(`Processed ${processedCount}/${files.length}`);
-              if (processedCount === files.length) finalizeProcessing(results);
-          }
+                            if (!results[scenarioName]) results[scenarioName] = [];
+                            results[scenarioName].push({
+                                id: Math.random().toString(36).substr(2, 9),
+                                date: dateStr || new Date().toISOString(),
+                                score: score,
+                                scenario: scenarioName,
+                                accuracy: parseFloat((row['Accuracy'] || '0').replace(',', '.')),
+                                ttk: parseFloat((row['Time To Kill'] || '0').replace(',', '.')),
+                                fps: parseFloat((row['Avg FPS'] || '0').replace(',', '.')),
+                                fatigue: 0
+                            });
+                        });
+                    }
+                });
+            }
+        } catch (err) {
+            console.error(`Error parsing ${file.name}:`, err);
+        } finally {
+            processedCount++;
+            if (processedCount % 50 === 0) console.log(`Processed ${processedCount}/${files.length}`);
+            if (processedCount === files.length) finalize();
         }
-      });
-    });
+    }
   };
 
   // --- 6. EVENT HANDLERS ---
