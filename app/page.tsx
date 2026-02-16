@@ -1,15 +1,16 @@
 "use client";
 
-import React, { useState, useCallback, useMemo, useEffect, useRef } from "react"; // Added useRef
+import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
+import Link from "next/link"; // <--- Added for Navigation
 import { createClient } from "@supabase/supabase-js";
 import {
-  LineChart, Line, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Label
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
 import { 
   UploadCloud, FileText, TrendingUp, Trophy, 
-  Crosshair, Timer, Monitor, Activity, BatteryCharging, Shuffle, LogIn, LogOut, Cloud, User
+  Crosshair, Activity, LogIn, LogOut, Cloud, User, BarChart2, Shield
 } from "lucide-react";
 
 // --- 1. DATABASE CONNECTION ---
@@ -126,7 +127,7 @@ export default function KovaaksTracker() {
     setIsSyncing(false);
   };
 
-  // --- 5. FILE PARSING LOGIC (UPDATED) ---
+  // --- 5. FILE PARSING LOGIC (SMART PARSER) ---
   const processFiles = (files: File[]) => {
     console.log("Processing files:", files);
     setIsProcessing(true);
@@ -139,7 +140,6 @@ export default function KovaaksTracker() {
     }
 
     files.forEach(file => {
-      // Parse with header: false first to inspect structure
       Papa.parse(file, {
         header: false,
         skipEmptyLines: true,
@@ -147,19 +147,16 @@ export default function KovaaksTracker() {
           const rows = result.data as string[][];
           if (!rows || rows.length === 0) {
              processedCount++;
+             if (processedCount === files.length) finalizeProcessing(results);
              return;
           }
 
-          // Detect CSV Type
           const firstCell = rows[0][0]?.trim();
           let extractedData: KovaaksDataPoint | null = null;
 
-          // TYPE A: "Detailed Stats" (The file you uploaded)
-          // Starts with "Kill #"
+          // TYPE A: Detailed Stats (Your File)
           if (firstCell === 'Kill #') {
             const dataMap: Record<string, string> = {};
-            
-            // Scan all rows for "Key:, Value" pairs (usually at the bottom)
             rows.forEach(row => {
               if (row.length >= 2) {
                 const key = row[0]?.trim().replace(':', '');
@@ -168,22 +165,17 @@ export default function KovaaksTracker() {
               }
             });
 
-            // Extract values
             const scenario = dataMap['Scenario'];
             const score = parseFloat(dataMap['Score']);
-            
-            // Calculate Accuracy from Hit/Miss counts if available
             let accuracy = 0;
             const hits = parseInt(dataMap['Hit Count'] || '0');
             const misses = parseInt(dataMap['Miss Count'] || '0');
             if (hits + misses > 0) accuracy = hits / (hits + misses);
 
-            // Date Parsing (Try Filename first, it's more complete)
-            // Name format: "... - 2025.11.03-20.05.18 Stats.csv"
+            // Date from Filename
             let date = new Date().toISOString();
             const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2})/);
             if (nameMatch) {
-               // Convert "2025.11.03-20.05.18" to ISO "2025-11-03T20:05:18"
                const isoString = nameMatch[0].replace(/\./g, '-').replace('-', 'T').replace(/\./g, ':');
                if (!isNaN(Date.parse(isoString))) date = isoString;
             }
@@ -201,73 +193,78 @@ export default function KovaaksTracker() {
               };
             }
           } 
-          
-          // TYPE B: "Session Stats" (Summary CSV)
-          // Starts with "Scenario Name" (The original format we coded for)
+          // TYPE B: Summary Stats (Legacy)
           else if (firstCell === 'Scenario Name') {
-             // We need to re-parse with headers or map manually. 
-             // Let's map manually to avoid double parsing.
              const header = rows[0];
-             // Find indices
              const iScenario = header.indexOf('Scenario Name');
              const iScore = header.indexOf('Score');
              const iDate = header.indexOf('Date and Time');
-             const iAcc = header.indexOf('Accuracy');
-             const iTTK = header.indexOf('Time To Kill');
-             const iFPS = header.indexOf('Avg FPS');
-
-             // Process just the FIRST data row (usually summary files have 1 header + N rows)
-             // But we loop just in case
+             
              for (let i = 1; i < rows.length; i++) {
                 const row = rows[i];
                 if (row[iScenario]) {
                    const scenarioName = row[iScenario];
-                   // Add to results immediately
                    if (!results[scenarioName]) results[scenarioName] = [];
                    results[scenarioName].push({
                       id: Math.random().toString(36).substr(2, 9),
                       date: row[iDate] || new Date().toISOString(),
                       score: parseFloat(row[iScore]) || 0,
                       scenario: scenarioName,
-                      accuracy: parseFloat(row[iAcc]) || 0,
-                      ttk: parseFloat(row[iTTK]) || 0,
-                      fps: parseFloat(row[iFPS]) || 0,
+                      accuracy: parseFloat(row[header.indexOf('Accuracy')]) || 0,
+                      ttk: parseFloat(row[header.indexOf('Time To Kill')]) || 0,
+                      fps: parseFloat(row[header.indexOf('Avg FPS')]) || 0,
                       fatigue: 0
                    });
                 }
              }
-             // For Type B, we did the push inside the loop, so just update counter
              processedCount++;
-             if (processedCount === files.length) {
-               finalizeProcessing();
-             }
+             if (processedCount === files.length) finalizeProcessing(results);
              return; 
           }
 
-          // Save Extracted Data (For Type A)
           if (extractedData) {
             if (!results[extractedData.scenario]) results[extractedData.scenario] = [];
             results[extractedData.scenario].push(extractedData);
           }
 
           processedCount++;
-          if (processedCount === files.length) {
-            finalizeProcessing();
-          }
+          if (processedCount === files.length) finalizeProcessing(results);
         }
       });
     });
-
-    const finalizeProcessing = () => {
-        Object.keys(results).forEach(key => {
-            results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-        });
-        console.log("Parsed Stats:", results);
-        setStats(prev => ({ ...prev, ...results }));
-        setIsProcessing(false);
-    };
   };
-  // --- 6. RENDER HELPERS ---
+
+  const finalizeProcessing = (results: ParsedResults) => {
+    Object.keys(results).forEach(key => {
+        results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    });
+    console.log("Parsed Stats:", results);
+    setStats(prev => ({ ...prev, ...results }));
+    setIsProcessing(false);
+  };
+
+  // --- 6. EVENT HANDLERS ---
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const files = Array.from(e.dataTransfer.files).filter(f => 
+        f.name.toLowerCase().endsWith('.csv')
+    );
+    if (files.length > 0) processFiles(files);
+    else alert("No CSV files found.");
+  }, []);
+
+  // *** THIS IS THE FUNCTION THAT WAS MISSING ***
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+        const files = Array.from(e.target.files).filter(f => 
+            f.name.toLowerCase().endsWith('.csv')
+        );
+        processFiles(files);
+    }
+  };
+
+  // --- 7. RENDER HELPERS ---
   const chartData = useMemo(() => {
     if (!selectedScenario || !stats[selectedScenario]) return [];
     return stats[selectedScenario].map(pt => ({
@@ -282,15 +279,34 @@ export default function KovaaksTracker() {
       {/* NAVBAR */}
       <nav className="border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-sm sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          
+          {/* Logo */}
+          <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
             <Activity className="w-6 h-6 text-yellow-500" />
             <span className="font-bold text-xl tracking-tight">KOVA<span className="text-yellow-500">AKS</span>.PRO</span>
-          </div>
-          <div className="flex items-center gap-4">
-             {user && (
-                 <a href="/admin" className="text-sm text-neutral-400 hover:text-white transition-colors">Admin Panel</a>
+          </Link>
+
+          {/* NEW NAVIGATION LINKS */}
+          <div className="hidden md:flex items-center gap-6">
+            <Link href="/" className="text-sm font-bold text-white border-b-2 border-yellow-500 pb-1">
+              Dashboard
+            </Link>
+            <Link href="/leaderboard" className="text-sm font-medium text-neutral-400 hover:text-white transition-colors flex items-center gap-2">
+              <Trophy className="w-4 h-4" /> Leaderboard
+            </Link>
+            <Link href="/compare" className="text-sm font-medium text-neutral-400 hover:text-white transition-colors flex items-center gap-2">
+              <BarChart2 className="w-4 h-4" /> Compare
+            </Link>
+             {/* Only show Admin if user is logged in (you can improve this check later) */}
+            {user && (
+                <Link href="/admin" className="text-sm font-medium text-neutral-400 hover:text-red-400 transition-colors flex items-center gap-2">
+                    <Shield className="w-4 h-4" /> Admin
+                </Link>
             )}
-            
+          </div>
+
+          {/* User Auth */}
+          <div className="flex items-center gap-4">
             {user ? (
               <div className="flex items-center gap-4">
                 <span className="text-sm text-neutral-400 hidden md:block">
@@ -319,23 +335,22 @@ export default function KovaaksTracker() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
         
-        {/* HERO / UPLOAD SECTION (UPDATED) */}
+        {/* HERO / UPLOAD SECTION */}
         <section className="relative group rounded-2xl border-2 border-dashed border-neutral-800 bg-neutral-900/20 hover:border-yellow-500/50 transition-all duration-300">
           
-          {/* Hidden Input for Click Upload */}
           <input 
             type="file" 
             multiple 
             accept=".csv" 
             ref={fileInputRef} 
-            onChange={handleFileSelect} 
+            onChange={handleFileSelect} // This now works!
             className="hidden" 
           />
 
           <div 
             onDrop={onDrop}
             onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-            onClick={() => fileInputRef.current?.click()} // CLICK HANDLER
+            onClick={() => fileInputRef.current?.click()}
             className="p-12 text-center space-y-4 cursor-pointer"
           >
             <div className="w-16 h-16 bg-neutral-800 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
