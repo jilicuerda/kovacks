@@ -126,9 +126,9 @@ export default function KovaaksTracker() {
     setIsSyncing(false);
   };
 
-  // --- 5. FILE PARSING LOGIC ---
+  // --- 5. FILE PARSING LOGIC (UPDATED) ---
   const processFiles = (files: File[]) => {
-    console.log("Processing files:", files); // DEBUG LOG
+    console.log("Processing files:", files);
     setIsProcessing(true);
     const results: ParsedResults = {};
     let processedCount = 0;
@@ -139,69 +139,134 @@ export default function KovaaksTracker() {
     }
 
     files.forEach(file => {
+      // Parse with header: false first to inspect structure
       Papa.parse(file, {
-        header: true,
+        header: false,
         skipEmptyLines: true,
         complete: (result) => {
-          result.data.forEach((row: any) => {
-            const scenario = row['Scenario Name'];
-            if (!scenario) return;
+          const rows = result.data as string[][];
+          if (!rows || rows.length === 0) {
+             processedCount++;
+             return;
+          }
 
-            if (!results[scenario]) results[scenario] = [];
+          // Detect CSV Type
+          const firstCell = rows[0][0]?.trim();
+          let extractedData: KovaaksDataPoint | null = null;
 
-            results[scenario].push({
-              id: Math.random().toString(36).substr(2, 9),
-              date: row['Date and Time'] || new Date().toISOString(),
-              score: parseFloat(row['Score']) || 0,
-              scenario: scenario,
-              accuracy: parseFloat(row['Accuracy']) || 0,
-              ttk: parseFloat(row['Time To Kill']) || 0,
-              fps: parseFloat(row['Avg FPS']) || 0,
-              fatigue: 0 
+          // TYPE A: "Detailed Stats" (The file you uploaded)
+          // Starts with "Kill #"
+          if (firstCell === 'Kill #') {
+            const dataMap: Record<string, string> = {};
+            
+            // Scan all rows for "Key:, Value" pairs (usually at the bottom)
+            rows.forEach(row => {
+              if (row.length >= 2) {
+                const key = row[0]?.trim().replace(':', '');
+                const val = row[1]?.trim();
+                if (key) dataMap[key] = val;
+              }
             });
-          });
+
+            // Extract values
+            const scenario = dataMap['Scenario'];
+            const score = parseFloat(dataMap['Score']);
+            
+            // Calculate Accuracy from Hit/Miss counts if available
+            let accuracy = 0;
+            const hits = parseInt(dataMap['Hit Count'] || '0');
+            const misses = parseInt(dataMap['Miss Count'] || '0');
+            if (hits + misses > 0) accuracy = hits / (hits + misses);
+
+            // Date Parsing (Try Filename first, it's more complete)
+            // Name format: "... - 2025.11.03-20.05.18 Stats.csv"
+            let date = new Date().toISOString();
+            const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2})/);
+            if (nameMatch) {
+               // Convert "2025.11.03-20.05.18" to ISO "2025-11-03T20:05:18"
+               const isoString = nameMatch[0].replace(/\./g, '-').replace('-', 'T').replace(/\./g, ':');
+               if (!isNaN(Date.parse(isoString))) date = isoString;
+            }
+
+            if (scenario && !isNaN(score)) {
+              extractedData = {
+                id: Math.random().toString(36).substr(2, 9),
+                date: date,
+                score: score,
+                scenario: scenario,
+                accuracy: accuracy,
+                ttk: parseFloat(dataMap['Avg TTK'] || '0'),
+                fps: parseFloat(dataMap['Avg FPS'] || '0'),
+                fatigue: 0 
+              };
+            }
+          } 
+          
+          // TYPE B: "Session Stats" (Summary CSV)
+          // Starts with "Scenario Name" (The original format we coded for)
+          else if (firstCell === 'Scenario Name') {
+             // We need to re-parse with headers or map manually. 
+             // Let's map manually to avoid double parsing.
+             const header = rows[0];
+             // Find indices
+             const iScenario = header.indexOf('Scenario Name');
+             const iScore = header.indexOf('Score');
+             const iDate = header.indexOf('Date and Time');
+             const iAcc = header.indexOf('Accuracy');
+             const iTTK = header.indexOf('Time To Kill');
+             const iFPS = header.indexOf('Avg FPS');
+
+             // Process just the FIRST data row (usually summary files have 1 header + N rows)
+             // But we loop just in case
+             for (let i = 1; i < rows.length; i++) {
+                const row = rows[i];
+                if (row[iScenario]) {
+                   const scenarioName = row[iScenario];
+                   // Add to results immediately
+                   if (!results[scenarioName]) results[scenarioName] = [];
+                   results[scenarioName].push({
+                      id: Math.random().toString(36).substr(2, 9),
+                      date: row[iDate] || new Date().toISOString(),
+                      score: parseFloat(row[iScore]) || 0,
+                      scenario: scenarioName,
+                      accuracy: parseFloat(row[iAcc]) || 0,
+                      ttk: parseFloat(row[iTTK]) || 0,
+                      fps: parseFloat(row[iFPS]) || 0,
+                      fatigue: 0
+                   });
+                }
+             }
+             // For Type B, we did the push inside the loop, so just update counter
+             processedCount++;
+             if (processedCount === files.length) {
+               finalizeProcessing();
+             }
+             return; 
+          }
+
+          // Save Extracted Data (For Type A)
+          if (extractedData) {
+            if (!results[extractedData.scenario]) results[extractedData.scenario] = [];
+            results[extractedData.scenario].push(extractedData);
+          }
 
           processedCount++;
           if (processedCount === files.length) {
-            Object.keys(results).forEach(key => {
-              results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-            });
-            console.log("Parsed Stats:", results); // DEBUG LOG
-            setStats(prev => ({ ...prev, ...results }));
-            setIsProcessing(false);
+            finalizeProcessing();
           }
         }
       });
     });
+
+    const finalizeProcessing = () => {
+        Object.keys(results).forEach(key => {
+            results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        });
+        console.log("Parsed Stats:", results);
+        setStats(prev => ({ ...prev, ...results }));
+        setIsProcessing(false);
+    };
   };
-
-  // Handle Drag & Drop
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation(); // Important!
-    
-    // Case Insensitive check for .csv or .CSV
-    const files = Array.from(e.dataTransfer.files).filter(f => 
-        f.name.toLowerCase().endsWith('.csv')
-    );
-    
-    if (files.length > 0) {
-        processFiles(files);
-    } else {
-        alert("No CSV files found in drop. Make sure they end in .csv");
-    }
-  }, []);
-
-  // Handle Manual File Selection
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-        const files = Array.from(e.target.files).filter(f => 
-            f.name.toLowerCase().endsWith('.csv')
-        );
-        processFiles(files);
-    }
-  };
-
   // --- 6. RENDER HELPERS ---
   const chartData = useMemo(() => {
     if (!selectedScenario || !stats[selectedScenario]) return [];
