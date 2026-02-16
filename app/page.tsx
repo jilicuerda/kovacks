@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
-import Link from "next/link"; 
+import Link from "next/link"; // Added for Navigation
 import { createClient } from "@supabase/supabase-js";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
@@ -129,7 +129,6 @@ export default function KovaaksTracker() {
 
   // --- 5. FILE PARSING LOGIC (FIXED) ---
   const processFiles = (files: File[]) => {
-    console.log("Processing files:", files);
     setIsProcessing(true);
     const results: ParsedResults = {};
     let processedCount = 0;
@@ -181,7 +180,7 @@ export default function KovaaksTracker() {
 
             // DATE FIX: Handle "2025.11.03-20.05.18" safely
             let date = new Date().toISOString();
-            const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2})-(\d{2}\.\d{2}\.\d{2})/);
+            const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2}).*?(\d{2}\.\d{2}\.\d{2})/);
             
             if (nameMatch) {
                // nameMatch[1] = "2025.11.03", nameMatch[2] = "20.05.18"
@@ -243,7 +242,6 @@ export default function KovaaksTracker() {
     Object.keys(results).forEach(key => {
         results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     });
-    console.log("Parsed Stats Final:", results);
     setStats(prev => ({ ...prev, ...results }));
     setIsProcessing(false);
   };
@@ -259,6 +257,7 @@ export default function KovaaksTracker() {
     else alert("No CSV files found.");
   }, []);
 
+  // *** THIS IS THE FUNCTION THAT WAS MISSING ***
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
         const files = Array.from(e.target.files).filter(f => 
@@ -290,7 +289,7 @@ export default function KovaaksTracker() {
             <span className="font-bold text-xl tracking-tight">KOVA<span className="text-yellow-500">AKS</span>.PRO</span>
           </Link>
 
-          {/* NAVIGATION LINKS */}
+          {/* NEW NAVIGATION LINKS */}
           <div className="hidden md:flex items-center gap-6">
             <Link href="/" className="text-sm font-bold text-white border-b-2 border-yellow-500 pb-1">
               Dashboard
@@ -346,7 +345,7 @@ export default function KovaaksTracker() {
             multiple 
             accept=".csv" 
             ref={fileInputRef} 
-            onChange={handleFileSelect} 
+            onChange={handleFileSelect} // This now works!
             className="hidden" 
           />
 
