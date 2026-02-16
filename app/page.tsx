@@ -111,7 +111,7 @@ export default function KovaaksTracker() {
           ttk: run.ttk,
           fps: run.fps,
           fatigue: run.fatigue,
-          played_at: run.date // Date is already ISO string from parser
+          played_at: run.date 
         });
       });
     });
@@ -127,7 +127,19 @@ export default function KovaaksTracker() {
     setIsSyncing(false);
   };
 
- // --- 5. FILE PARSING LOGIC (UPDATED FOR EUROPEAN/FRENCH CSVs) ---
+  // --- 5. FILE PARSING LOGIC ---
+
+  // Helper: Finalize processing (Sorts and updates state)
+  const finalizeProcessing = (results: ParsedResults) => {
+    Object.keys(results).forEach(key => {
+        results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    });
+    console.log("Parsed Stats Final:", results);
+    setStats(prev => ({ ...prev, ...results }));
+    setIsProcessing(false);
+  };
+
+  // Main Parser (Auto-Detects Delimiters for French/EU Support)
   const processFiles = (files: File[]) => {
     console.log(`Starting to process ${files.length} files...`);
     setIsProcessing(true);
@@ -143,7 +155,7 @@ export default function KovaaksTracker() {
       Papa.parse(file, {
         header: false,
         skipEmptyLines: true,
-        delimiter: "", // <--- AUTO-DETECT (Comma or Semicolon)
+        delimiter: "", // AUTO-DETECT DELIMITER
         error: (err) => {
             console.error(`Error parsing ${file.name}:`, err);
             processedCount++;
@@ -162,11 +174,9 @@ export default function KovaaksTracker() {
                  rows[0][0] = rows[0][0].replace(/^\uFEFF/, '');
               }
 
-              // 1. Build a Data Map (Key: Value)
-              // We look for rows that look like "Key: Value" or "Key, Value"
+              // 1. Build Data Map
               const dataMap: Record<string, string> = {};
               rows.forEach(row => {
-                // Handle cases where the delimiter split might still fail or vary
                 if (row.length >= 2) {
                   const rawKey = row[0]?.toString().trim();
                   const key = rawKey?.replace(':', '').toLowerCase();
@@ -177,10 +187,10 @@ export default function KovaaksTracker() {
 
               // 2. Detect File Type
               
-              // TYPE A: Detailed Stats (Fingerprint: Has "Scenario" and "Score" metadata)
+              // TYPE A: Detailed Stats
               if (dataMap['scenario'] && dataMap['score']) {
                 const scenario = dataMap['scenario'];
-                const score = parseFloat(dataMap['score'].replace(',', '.')); // Fix French decimals (888,5 -> 888.5)
+                const score = parseFloat(dataMap['score'].replace(',', '.')); // Fix French decimals
                 
                 let accuracy = 0;
                 const hits = parseInt(dataMap['hit count'] || '0');
@@ -211,36 +221,32 @@ export default function KovaaksTracker() {
                   });
                 }
               } 
-              // TYPE B: Summary Stats (Row 0 starts with "Scenario Name")
-              // We check substring because sometimes "Scenario Name" might have weird chars
+              // TYPE B: Summary Stats
               else if (rows[0][0] && rows[0][0].includes('Scenario Name')) {
                  const header = rows[0];
                  const iScenario = header.indexOf('Scenario Name');
                  const iScore = header.indexOf('Score');
                  const iDate = header.indexOf('Date and Time');
                  
-                 // If we can't find headers, maybe they are shifted?
-                 if (iScenario === -1 || iScore === -1) return;
+                 if (iScenario !== -1 && iScore !== -1) {
+                    for (let i = 1; i < rows.length; i++) {
+                        const row = rows[i];
+                        if (row[iScenario]) {
+                        const scenarioName = row[iScenario];
+                        const score = parseFloat((row[iScore] || '0').replace(',', '.'));
 
-                 for (let i = 1; i < rows.length; i++) {
-                    const row = rows[i];
-                    if (row[iScenario]) {
-                       const scenarioName = row[iScenario];
-                       const rawScore = row[iScore];
-                       // Handle French Decimals in Summary too
-                       const score = parseFloat(rawScore?.replace(',', '.') || '0');
-
-                       if (!results[scenarioName]) results[scenarioName] = [];
-                       results[scenarioName].push({
-                          id: Math.random().toString(36).substr(2, 9),
-                          date: row[iDate] || new Date().toISOString(),
-                          score: score,
-                          scenario: scenarioName,
-                          accuracy: parseFloat((row[header.indexOf('Accuracy')] || '0').replace(',', '.')),
-                          ttk: parseFloat((row[header.indexOf('Time To Kill')] || '0').replace(',', '.')),
-                          fps: parseFloat((row[header.indexOf('Avg FPS')] || '0').replace(',', '.')),
-                          fatigue: 0
-                       });
+                        if (!results[scenarioName]) results[scenarioName] = [];
+                        results[scenarioName].push({
+                            id: Math.random().toString(36).substr(2, 9),
+                            date: row[iDate] || new Date().toISOString(),
+                            score: score,
+                            scenario: scenarioName,
+                            accuracy: parseFloat((row[header.indexOf('Accuracy')] || '0').replace(',', '.')),
+                            ttk: parseFloat((row[header.indexOf('Time To Kill')] || '0').replace(',', '.')),
+                            fps: parseFloat((row[header.indexOf('Avg FPS')] || '0').replace(',', '.')),
+                            fatigue: 0
+                        });
+                        }
                     }
                  }
               }
@@ -255,6 +261,7 @@ export default function KovaaksTracker() {
       });
     });
   };
+
   // --- 6. EVENT HANDLERS ---
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
