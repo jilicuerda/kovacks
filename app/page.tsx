@@ -127,9 +127,7 @@ export default function KovaaksTracker() {
     setIsSyncing(false);
   };
 
-  // --- 5. FILE PARSING LOGIC ---
-
-  // Helper: Finalize processing (Sorts and updates state)
+  // --- 5. FILE PARSING LOGIC (BRUTE FORCE VERSION) ---
   const finalizeProcessing = (results: ParsedResults) => {
     Object.keys(results).forEach(key => {
         results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
@@ -139,7 +137,6 @@ export default function KovaaksTracker() {
     setIsProcessing(false);
   };
 
-  // Main Parser (Auto-Detects Delimiters for French/EU Support)
   const processFiles = (files: File[]) => {
     console.log(`Starting to process ${files.length} files...`);
     setIsProcessing(true);
@@ -155,7 +152,7 @@ export default function KovaaksTracker() {
       Papa.parse(file, {
         header: false,
         skipEmptyLines: true,
-        delimiter: "", // AUTO-DETECT DELIMITER
+        delimiter: "", // Auto-detect
         error: (err) => {
             console.error(`Error parsing ${file.name}:`, err);
             processedCount++;
@@ -163,7 +160,7 @@ export default function KovaaksTracker() {
         },
         complete: (result) => {
           try {
-              const rows = result.data as string[][];
+              let rows = result.data as string[][];
               
               if (!rows || rows.length === 0) {
                  return; 
@@ -174,23 +171,32 @@ export default function KovaaksTracker() {
                  rows[0][0] = rows[0][0].replace(/^\uFEFF/, '');
               }
 
-              // 1. Build Data Map
+              // 1. Build Data Map with Brute Force Splitting
               const dataMap: Record<string, string> = {};
+              
               rows.forEach(row => {
-                if (row.length >= 2) {
-                  const rawKey = row[0]?.toString().trim();
+                let cells = row;
+                
+                // FALLBACK: If row is length 1, manually split by ; or ,
+                if (cells.length === 1 && typeof cells[0] === 'string') {
+                    if (cells[0].includes(';')) cells = cells[0].split(';');
+                    else if (cells[0].includes(',')) cells = cells[0].split(',');
+                }
+
+                if (cells.length >= 2) {
+                  const rawKey = cells[0]?.toString().trim();
                   const key = rawKey?.replace(':', '').toLowerCase();
-                  const val = row[1]?.toString().trim();
+                  const val = cells[1]?.toString().trim();
                   if (key && val) dataMap[key] = val;
                 }
               });
 
-              // 2. Detect File Type
+              // 2. Detect File Type & Extract
               
               // TYPE A: Detailed Stats
               if (dataMap['scenario'] && dataMap['score']) {
                 const scenario = dataMap['scenario'];
-                const score = parseFloat(dataMap['score'].replace(',', '.')); // Fix French decimals
+                const score = parseFloat(dataMap['score'].replace(',', '.')); // French decimal fix
                 
                 let accuracy = 0;
                 const hits = parseInt(dataMap['hit count'] || '0');
@@ -221,33 +227,50 @@ export default function KovaaksTracker() {
                   });
                 }
               } 
-              // TYPE B: Summary Stats
-              else if (rows[0][0] && rows[0][0].includes('Scenario Name')) {
-                 const header = rows[0];
-                 const iScenario = header.indexOf('Scenario Name');
-                 const iScore = header.indexOf('Score');
-                 const iDate = header.indexOf('Date and Time');
-                 
-                 if (iScenario !== -1 && iScore !== -1) {
-                    for (let i = 1; i < rows.length; i++) {
-                        const row = rows[i];
-                        if (row[iScenario]) {
-                        const scenarioName = row[iScenario];
-                        const score = parseFloat((row[iScore] || '0').replace(',', '.'));
+              // TYPE B: Summary Stats (Fallback check for single-line manual split)
+              else {
+                 // Check the header row again using the "manual split" logic
+                 let header = rows[0];
+                 if (header.length === 1 && typeof header[0] === 'string') {
+                    if (header[0].includes(';')) header = header[0].split(';');
+                    else if (header[0].includes(',')) header = header[0].split(',');
+                 }
 
-                        if (!results[scenarioName]) results[scenarioName] = [];
-                        results[scenarioName].push({
-                            id: Math.random().toString(36).substr(2, 9),
-                            date: row[iDate] || new Date().toISOString(),
-                            score: score,
-                            scenario: scenarioName,
-                            accuracy: parseFloat((row[header.indexOf('Accuracy')] || '0').replace(',', '.')),
-                            ttk: parseFloat((row[header.indexOf('Time To Kill')] || '0').replace(',', '.')),
-                            fps: parseFloat((row[header.indexOf('Avg FPS')] || '0').replace(',', '.')),
-                            fatigue: 0
-                        });
+                 if (header[0] && header[0].includes('Scenario Name')) {
+                     const iScenario = header.findIndex(h => h.includes('Scenario Name'));
+                     const iScore = header.findIndex(h => h.includes('Score'));
+                     const iDate = header.findIndex(h => h.includes('Date and Time'));
+                     const iAcc = header.findIndex(h => h.includes('Accuracy'));
+                     const iTTK = header.findIndex(h => h.includes('Time To Kill'));
+                     const iFPS = header.findIndex(h => h.includes('Avg FPS'));
+                     
+                     if (iScenario !== -1 && iScore !== -1) {
+                        for (let i = 1; i < rows.length; i++) {
+                            let row = rows[i];
+                            // Split row if needed
+                            if (row.length === 1 && typeof row[0] === 'string') {
+                                if (row[0].includes(';')) row = row[0].split(';');
+                                else if (row[0].includes(',')) row = row[0].split(',');
+                            }
+
+                            if (row[iScenario]) {
+                                const scenarioName = row[iScenario];
+                                const score = parseFloat((row[iScore] || '0').replace(',', '.'));
+
+                                if (!results[scenarioName]) results[scenarioName] = [];
+                                results[scenarioName].push({
+                                    id: Math.random().toString(36).substr(2, 9),
+                                    date: row[iDate] || new Date().toISOString(),
+                                    score: score,
+                                    scenario: scenarioName,
+                                    accuracy: parseFloat((row[iAcc] || '0').replace(',', '.')),
+                                    ttk: parseFloat((row[iTTK] || '0').replace(',', '.')),
+                                    fps: parseFloat((row[iFPS] || '0').replace(',', '.')),
+                                    fatigue: 0
+                                });
+                            }
                         }
-                    }
+                     }
                  }
               }
           } catch (e) {
