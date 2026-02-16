@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
-import Link from "next/link"; // <--- Added for Navigation
+import Link from "next/link"; 
 import { createClient } from "@supabase/supabase-js";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
@@ -111,7 +111,7 @@ export default function KovaaksTracker() {
           ttk: run.ttk,
           fps: run.fps,
           fatigue: run.fatigue,
-          played_at: run.date && !isNaN(Date.parse(run.date)) ? run.date : new Date().toISOString()
+          played_at: run.date // Date is already ISO string from parser
         });
       });
     });
@@ -127,7 +127,7 @@ export default function KovaaksTracker() {
     setIsSyncing(false);
   };
 
-  // --- 5. FILE PARSING LOGIC (SMART PARSER) ---
+  // --- 5. FILE PARSING LOGIC (FIXED) ---
   const processFiles = (files: File[]) => {
     console.log("Processing files:", files);
     setIsProcessing(true);
@@ -151,50 +151,62 @@ export default function KovaaksTracker() {
              return;
           }
 
-          const firstCell = rows[0][0]?.trim();
-          let extractedData: KovaaksDataPoint | null = null;
+          // CLEANUP: Handle BOM (invisible character at start of file)
+          if (rows[0][0]) {
+             rows[0][0] = rows[0][0].replace(/^\uFEFF/, '');
+          }
 
-          // TYPE A: Detailed Stats (Your File)
-          if (firstCell === 'Kill #') {
-            const dataMap: Record<string, string> = {};
-            rows.forEach(row => {
-              if (row.length >= 2) {
-                const key = row[0]?.trim().replace(':', '');
-                const val = row[1]?.trim();
-                if (key) dataMap[key] = val;
-              }
-            });
+          // STRATEGY: Look for Metadata Keys (Scenario, Score) anywhere in file
+          const dataMap: Record<string, string> = {};
+          rows.forEach(row => {
+            if (row.length >= 2) {
+              const rawKey = row[0]?.toString().trim();
+              // Normalize key: "Scenario:" -> "scenario"
+              const key = rawKey?.replace(':', '').toLowerCase();
+              const val = row[1]?.toString().trim();
+              if (key && val) dataMap[key] = val;
+            }
+          });
 
-            const scenario = dataMap['Scenario'];
-            const score = parseFloat(dataMap['Score']);
+          // Check if we found the Detailed Stats "Fingerprint"
+          if (dataMap['scenario'] && dataMap['score']) {
+            // --- TYPE A: DETAILED STATS ---
+            const scenario = dataMap['scenario'];
+            const score = parseFloat(dataMap['score']);
+            
             let accuracy = 0;
-            const hits = parseInt(dataMap['Hit Count'] || '0');
-            const misses = parseInt(dataMap['Miss Count'] || '0');
+            const hits = parseInt(dataMap['hit count'] || '0');
+            const misses = parseInt(dataMap['miss count'] || '0');
             if (hits + misses > 0) accuracy = hits / (hits + misses);
 
-            // Date from Filename
+            // DATE FIX: Handle "2025.11.03-20.05.18" safely
             let date = new Date().toISOString();
-            const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2})/);
+            const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2})-(\d{2}\.\d{2}\.\d{2})/);
+            
             if (nameMatch) {
-               const isoString = nameMatch[0].replace(/\./g, '-').replace('-', 'T').replace(/\./g, ':');
+               // nameMatch[1] = "2025.11.03", nameMatch[2] = "20.05.18"
+               const datePart = nameMatch[1].replace(/\./g, '-'); // 2025-11-03
+               const timePart = nameMatch[2].replace(/\./g, ':'); // 20:05:18
+               const isoString = `${datePart}T${timePart}`;       // 2025-11-03T20:05:18
                if (!isNaN(Date.parse(isoString))) date = isoString;
             }
 
             if (scenario && !isNaN(score)) {
-              extractedData = {
+              if (!results[scenario]) results[scenario] = [];
+              results[scenario].push({
                 id: Math.random().toString(36).substr(2, 9),
                 date: date,
                 score: score,
                 scenario: scenario,
                 accuracy: accuracy,
-                ttk: parseFloat(dataMap['Avg TTK'] || '0'),
-                fps: parseFloat(dataMap['Avg FPS'] || '0'),
+                ttk: parseFloat(dataMap['avg ttk'] || '0'),
+                fps: parseFloat(dataMap['avg fps'] || '0'),
                 fatigue: 0 
-              };
+              });
             }
           } 
-          // TYPE B: Summary Stats (Legacy)
-          else if (firstCell === 'Scenario Name') {
+          else if (rows[0][0] === 'Scenario Name') {
+             // --- TYPE B: SUMMARY STATS (Legacy) ---
              const header = rows[0];
              const iScenario = header.indexOf('Scenario Name');
              const iScore = header.indexOf('Score');
@@ -217,14 +229,6 @@ export default function KovaaksTracker() {
                    });
                 }
              }
-             processedCount++;
-             if (processedCount === files.length) finalizeProcessing(results);
-             return; 
-          }
-
-          if (extractedData) {
-            if (!results[extractedData.scenario]) results[extractedData.scenario] = [];
-            results[extractedData.scenario].push(extractedData);
           }
 
           processedCount++;
@@ -235,10 +239,11 @@ export default function KovaaksTracker() {
   };
 
   const finalizeProcessing = (results: ParsedResults) => {
+    // Sort results by date
     Object.keys(results).forEach(key => {
         results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     });
-    console.log("Parsed Stats:", results);
+    console.log("Parsed Stats Final:", results);
     setStats(prev => ({ ...prev, ...results }));
     setIsProcessing(false);
   };
@@ -254,7 +259,6 @@ export default function KovaaksTracker() {
     else alert("No CSV files found.");
   }, []);
 
-  // *** THIS IS THE FUNCTION THAT WAS MISSING ***
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
         const files = Array.from(e.target.files).filter(f => 
@@ -286,7 +290,7 @@ export default function KovaaksTracker() {
             <span className="font-bold text-xl tracking-tight">KOVA<span className="text-yellow-500">AKS</span>.PRO</span>
           </Link>
 
-          {/* NEW NAVIGATION LINKS */}
+          {/* NAVIGATION LINKS */}
           <div className="hidden md:flex items-center gap-6">
             <Link href="/" className="text-sm font-bold text-white border-b-2 border-yellow-500 pb-1">
               Dashboard
@@ -297,7 +301,6 @@ export default function KovaaksTracker() {
             <Link href="/compare" className="text-sm font-medium text-neutral-400 hover:text-white transition-colors flex items-center gap-2">
               <BarChart2 className="w-4 h-4" /> Compare
             </Link>
-             {/* Only show Admin if user is logged in (you can improve this check later) */}
             {user && (
                 <Link href="/admin" className="text-sm font-medium text-neutral-400 hover:text-red-400 transition-colors flex items-center gap-2">
                     <Shield className="w-4 h-4" /> Admin
@@ -343,7 +346,7 @@ export default function KovaaksTracker() {
             multiple 
             accept=".csv" 
             ref={fileInputRef} 
-            onChange={handleFileSelect} // This now works!
+            onChange={handleFileSelect} 
             className="hidden" 
           />
 
