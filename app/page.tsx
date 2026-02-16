@@ -9,7 +9,7 @@ import {
 } from "recharts";
 import { 
   UploadCloud, FileText, TrendingUp, Trophy, 
-  Crosshair, Timer, Monitor, Activity, BatteryCharging, Shuffle, LogIn, LogOut, Cloud
+  Crosshair, Timer, Monitor, Activity, BatteryCharging, Shuffle, LogIn, LogOut, Cloud, User
 } from "lucide-react";
 
 // --- 1. DATABASE CONNECTION ---
@@ -42,6 +42,8 @@ export default function KovaaksTracker() {
   const [user, setUser] = useState<any>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [username, setUsername] = useState(""); // NEW: Username state
+  const [isSignUpMode, setIsSignUpMode] = useState(false); // NEW: Toggle between Login/Signup
   const [showLogin, setShowLogin] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -62,26 +64,33 @@ export default function KovaaksTracker() {
     };
   }, []);
 
-  const handleLogin = async () => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) alert(error.message);
-    else setShowLogin(false);
-  };
-
-  const handleSignUp = async () => {
-    // We sign up with metadata (username) if we want, but simple email is fine for now
-    const { error } = await supabase.auth.signUp({ 
-      email, 
-      password,
-      options: {
-        // This helps the database trigger we made earlier find a username
-        data: { username: email.split('@')[0] } 
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (isSignUpMode) {
+      // --- SIGN UP LOGIC ---
+      if (!username) return alert("Please enter a username.");
+      
+      const { error } = await supabase.auth.signUp({ 
+        email, 
+        password,
+        options: {
+          data: { username: username } // Save username to DB
+        }
+      });
+      
+      if (error) {
+        alert(error.message);
+      } else {
+        alert("Account created successfully! You are logged in.");
+        setShowLogin(false);
       }
-    });
-    if (error) alert(error.message);
-    else {
-      alert("Account created! You are now logged in.");
-      setShowLogin(false);
+
+    } else {
+      // --- LOG IN LOGIC ---
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) alert(error.message);
+      else setShowLogin(false);
     }
   };
 
@@ -89,16 +98,14 @@ export default function KovaaksTracker() {
     await supabase.auth.signOut();
   };
 
-  // --- 4. DATA SYNC LOGIC (NEW FEATURE) ---
+  // --- 4. DATA SYNC LOGIC ---
   const handleSync = async () => {
     if (!user) return alert("Please log in to sync stats.");
     if (_.isEmpty(stats)) return alert("No stats to sync! Upload some CSV files first.");
 
     setIsSyncing(true);
     
-    // Flatten the 'stats' object into a single array of rows for the database
     const scoresToUpload: any[] = [];
-    
     Object.values(stats).forEach((scenarioRuns) => {
       scenarioRuns.forEach((run) => {
         scoresToUpload.push({
@@ -109,13 +116,11 @@ export default function KovaaksTracker() {
           ttk: run.ttk,
           fps: run.fps,
           fatigue: run.fatigue,
-          // Ensure we have a valid date, or use 'now'
           played_at: run.date && !isNaN(Date.parse(run.date)) ? run.date : new Date().toISOString()
         });
       });
     });
 
-    // Send to Supabase
     const { error } = await supabase.from('scores').insert(scoresToUpload);
     
     if (error) {
@@ -159,7 +164,6 @@ export default function KovaaksTracker() {
 
           processedCount++;
           if (processedCount === files.length) {
-            // Sort by date
             Object.keys(results).forEach(key => {
               results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
             });
@@ -177,7 +181,6 @@ export default function KovaaksTracker() {
     if (files.length > 0) processFiles(files);
   }, []);
 
-  // --- 6. RENDER HELPERS ---
   const chartData = useMemo(() => {
     if (!selectedScenario || !stats[selectedScenario]) return [];
     return stats[selectedScenario].map(pt => ({
@@ -197,8 +200,7 @@ export default function KovaaksTracker() {
             <span className="font-bold text-xl tracking-tight">KOVA<span className="text-yellow-500">AKS</span>.PRO</span>
           </div>
           <div className="flex items-center gap-4">
-             {/* Admin Link (Only visible if you know it exists, or we can hide it conditionally) */}
-            {user && (
+             {user && (
                  <a href="/admin" className="text-sm text-neutral-400 hover:text-white transition-colors">Admin Panel</a>
             )}
             
@@ -217,7 +219,7 @@ export default function KovaaksTracker() {
               </div>
             ) : (
               <button 
-                onClick={() => setShowLogin(true)}
+                onClick={() => { setShowLogin(true); setIsSignUpMode(false); }}
                 className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 px-4 py-2 rounded-lg text-sm font-medium transition-all"
               >
                 <LogIn className="w-4 h-4" />
@@ -252,7 +254,7 @@ export default function KovaaksTracker() {
           </div>
         </section>
 
-        {/* --- NEW SYNC BUTTON SECTION --- */}
+        {/* SYNC BUTTON */}
         {!_.isEmpty(stats) && (
           <div className="flex justify-center -mt-4 animate-in fade-in slide-in-from-top-4">
             <button
@@ -273,8 +275,7 @@ export default function KovaaksTracker() {
         {/* ANALYTICS DASHBOARD */}
         {!_.isEmpty(stats) && (
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-8 animate-in fade-in slide-in-from-bottom-8 duration-700">
-            
-            {/* SIDEBAR: Scenario List */}
+            {/* SIDEBAR */}
             <aside className="lg:col-span-1 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden h-[600px] flex flex-col">
               <div className="p-4 border-b border-neutral-800 bg-neutral-900">
                 <h3 className="font-bold flex items-center gap-2">
@@ -299,11 +300,10 @@ export default function KovaaksTracker() {
               </div>
             </aside>
 
-            {/* MAIN CHART AREA */}
+            {/* CHART AREA */}
             <section className="lg:col-span-3 space-y-6">
               {selectedScenario ? (
                 <>
-                  {/* KPI CARDS */}
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <MetricCard 
                       label="High Score" 
@@ -327,7 +327,6 @@ export default function KovaaksTracker() {
                     />
                   </div>
 
-                  {/* CHART CONTAINER */}
                   <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 h-[400px]">
                     <div className="flex justify-between items-center mb-6">
                       <h3 className="font-bold text-lg">{selectedScenario} Progress</h3>
@@ -387,53 +386,91 @@ export default function KovaaksTracker() {
         )}
       </main>
 
-      {/* LOGIN MODAL */}
+      {/* LOGIN / SIGNUP MODAL (UPDATED) */}
       {showLogin && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 w-full max-w-md shadow-2xl">
-            <h2 className="text-2xl font-bold mb-6 text-center">Account Access</h2>
-            <div className="space-y-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 w-full max-w-md shadow-2xl animate-in zoom-in-95">
+            <h2 className="text-2xl font-bold mb-6 text-center">
+              {isSignUpMode ? "Create Account" : "Welcome Back"}
+            </h2>
+            
+            <form onSubmit={handleAuth} className="space-y-4">
+              
+              {/* USERNAME FIELD - ONLY SHOWS ON SIGN UP */}
+              {isSignUpMode && (
+                <div>
+                  <label className="block text-sm text-neutral-400 mb-1">Username</label>
+                  <div className="relative">
+                    <User className="w-5 h-5 absolute left-3 top-3 text-neutral-500" />
+                    <input 
+                      type="text" 
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      className="w-full bg-neutral-950 border border-neutral-700 rounded-lg py-3 pl-10 pr-4 focus:border-yellow-500 outline-none transition-colors"
+                      placeholder="KovaaksGod2024"
+                      required
+                    />
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-sm text-neutral-400 mb-1">Email</label>
-                <input 
-                  type="email" 
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-3 focus:border-yellow-500 outline-none transition-colors"
-                  placeholder="name@example.com"
-                />
+                <div className="relative">
+                  <Cloud className="w-5 h-5 absolute left-3 top-3 text-neutral-500" />
+                  <input 
+                    type="email" 
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg py-3 pl-10 pr-4 focus:border-yellow-500 outline-none transition-colors"
+                    placeholder="name@example.com"
+                    required
+                  />
+                </div>
               </div>
+
               <div>
                 <label className="block text-sm text-neutral-400 mb-1">Password</label>
-                <input 
-                  type="password" 
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-3 focus:border-yellow-500 outline-none transition-colors"
-                  placeholder="••••••••"
-                />
+                <div className="relative">
+                  <LogIn className="w-5 h-5 absolute left-3 top-3 text-neutral-500" />
+                  <input 
+                    type="password" 
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-lg py-3 pl-10 pr-4 focus:border-yellow-500 outline-none transition-colors"
+                    placeholder="••••••••"
+                    required
+                  />
+                </div>
               </div>
-              <div className="grid grid-cols-2 gap-3 pt-2">
-                <button 
-                  onClick={handleLogin}
-                  className="bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-bold transition-colors"
-                >
-                  Log In
-                </button>
-                <button 
-                  onClick={handleSignUp}
-                  className="bg-neutral-800 hover:bg-neutral-700 text-white py-3 rounded-lg font-bold transition-colors"
-                >
-                  Sign Up
-                </button>
-              </div>
+
               <button 
-                onClick={() => setShowLogin(false)}
-                className="w-full text-neutral-500 text-sm hover:text-white mt-4"
+                type="submit"
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-bold transition-colors mt-2"
               >
-                Close
+                {isSignUpMode ? "Create Account" : "Log In"}
+              </button>
+            </form>
+
+            <div className="mt-4 text-center text-sm">
+              <span className="text-neutral-500">
+                {isSignUpMode ? "Already have an account? " : "Don't have an account? "}
+              </span>
+              <button 
+                type="button"
+                onClick={() => setIsSignUpMode(!isSignUpMode)}
+                className="text-yellow-500 hover:underline font-bold"
+              >
+                {isSignUpMode ? "Log In" : "Sign Up"}
               </button>
             </div>
+
+            <button 
+              onClick={() => setShowLogin(false)}
+              className="w-full text-neutral-500 text-sm hover:text-white mt-6 pt-4 border-t border-neutral-800"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}
@@ -442,7 +479,6 @@ export default function KovaaksTracker() {
   );
 }
 
-// Simple Subcomponent for KPI Cards
 function MetricCard({ label, value, icon }: { label: string, value: string | number, icon: React.ReactNode }) {
   return (
     <div className="bg-neutral-900 border border-neutral-800 p-4 rounded-xl flex flex-col justify-between hover:border-neutral-700 transition-colors">
