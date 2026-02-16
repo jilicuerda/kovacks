@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useMemo, useEffect } from "react";
+import React, { useState, useCallback, useMemo, useEffect, useRef } from "react"; // Added useRef
 import Papa from "papaparse";
 import _ from "lodash";
 import { createClient } from "@supabase/supabase-js";
@@ -42,10 +42,13 @@ export default function KovaaksTracker() {
   const [user, setUser] = useState<any>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [username, setUsername] = useState(""); // NEW: Username state
-  const [isSignUpMode, setIsSignUpMode] = useState(false); // NEW: Toggle between Login/Signup
+  const [username, setUsername] = useState("");
+  const [isSignUpMode, setIsSignUpMode] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // REF for file input
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- 3. AUTH LOGIC ---
   useEffect(() => {
@@ -66,28 +69,19 @@ export default function KovaaksTracker() {
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
-    
     if (isSignUpMode) {
-      // --- SIGN UP LOGIC ---
       if (!username) return alert("Please enter a username.");
-      
       const { error } = await supabase.auth.signUp({ 
         email, 
         password,
-        options: {
-          data: { username: username } // Save username to DB
-        }
+        options: { data: { username: username } }
       });
-      
-      if (error) {
-        alert(error.message);
-      } else {
+      if (error) alert(error.message);
+      else {
         alert("Account created successfully! You are logged in.");
         setShowLogin(false);
       }
-
     } else {
-      // --- LOG IN LOGIC ---
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) alert(error.message);
       else setShowLogin(false);
@@ -129,15 +123,20 @@ export default function KovaaksTracker() {
     } else {
       alert(`Success! Synced ${scoresToUpload.length} scores to the cloud.`);
     }
-    
     setIsSyncing(false);
   };
 
   // --- 5. FILE PARSING LOGIC ---
   const processFiles = (files: File[]) => {
+    console.log("Processing files:", files); // DEBUG LOG
     setIsProcessing(true);
     const results: ParsedResults = {};
     let processedCount = 0;
+
+    if (files.length === 0) {
+        setIsProcessing(false);
+        return;
+    }
 
     files.forEach(file => {
       Papa.parse(file, {
@@ -167,6 +166,7 @@ export default function KovaaksTracker() {
             Object.keys(results).forEach(key => {
               results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
             });
+            console.log("Parsed Stats:", results); // DEBUG LOG
             setStats(prev => ({ ...prev, ...results }));
             setIsProcessing(false);
           }
@@ -175,12 +175,34 @@ export default function KovaaksTracker() {
     });
   };
 
+  // Handle Drag & Drop
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
-    if (files.length > 0) processFiles(files);
+    e.stopPropagation(); // Important!
+    
+    // Case Insensitive check for .csv or .CSV
+    const files = Array.from(e.dataTransfer.files).filter(f => 
+        f.name.toLowerCase().endsWith('.csv')
+    );
+    
+    if (files.length > 0) {
+        processFiles(files);
+    } else {
+        alert("No CSV files found in drop. Make sure they end in .csv");
+    }
   }, []);
 
+  // Handle Manual File Selection
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+        const files = Array.from(e.target.files).filter(f => 
+            f.name.toLowerCase().endsWith('.csv')
+        );
+        processFiles(files);
+    }
+  };
+
+  // --- 6. RENDER HELPERS ---
   const chartData = useMemo(() => {
     if (!selectedScenario || !stats[selectedScenario]) return [];
     return stats[selectedScenario].map(pt => ({
@@ -232,11 +254,23 @@ export default function KovaaksTracker() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
         
-        {/* HERO / UPLOAD SECTION */}
+        {/* HERO / UPLOAD SECTION (UPDATED) */}
         <section className="relative group rounded-2xl border-2 border-dashed border-neutral-800 bg-neutral-900/20 hover:border-yellow-500/50 transition-all duration-300">
+          
+          {/* Hidden Input for Click Upload */}
+          <input 
+            type="file" 
+            multiple 
+            accept=".csv" 
+            ref={fileInputRef} 
+            onChange={handleFileSelect} 
+            className="hidden" 
+          />
+
           <div 
             onDrop={onDrop}
-            onDragOver={(e) => e.preventDefault()}
+            onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            onClick={() => fileInputRef.current?.click()} // CLICK HANDLER
             className="p-12 text-center space-y-4 cursor-pointer"
           >
             <div className="w-16 h-16 bg-neutral-800 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
@@ -244,11 +278,12 @@ export default function KovaaksTracker() {
             </div>
             <h2 className="text-2xl font-bold">Drop KovaaKs CSVs Here</h2>
             <p className="text-neutral-400 max-w-md mx-auto">
-              Drag and drop your stats folder. We analyze Score, Accuracy, TTK, and Fatigue locally.
+              Drag & Drop your .CSV files here <br/>
+              <span className="text-yellow-500 text-sm font-bold mt-2 inline-block">OR CLICK TO BROWSE</span>
             </p>
             {isProcessing && (
               <div className="text-yellow-500 font-mono animate-pulse">
-                Processing {Object.keys(stats).length} scenarios...
+                Processing files...
               </div>
             )}
           </div>
@@ -386,7 +421,7 @@ export default function KovaaksTracker() {
         )}
       </main>
 
-      {/* LOGIN / SIGNUP MODAL (UPDATED) */}
+      {/* LOGIN / SIGNUP MODAL */}
       {showLogin && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 w-full max-w-md shadow-2xl animate-in zoom-in-95">
@@ -396,7 +431,6 @@ export default function KovaaksTracker() {
             
             <form onSubmit={handleAuth} className="space-y-4">
               
-              {/* USERNAME FIELD - ONLY SHOWS ON SIGN UP */}
               {isSignUpMode && (
                 <div>
                   <label className="block text-sm text-neutral-400 mb-1">Username</label>
