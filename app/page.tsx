@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useMemo, useEffect } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
-import { createClient } from "@supabase/supabase-js"; // <--- THIS is the correct import
+import { createClient } from "@supabase/supabase-js";
 import {
   LineChart, Line, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Label
 } from "recharts";
@@ -12,8 +12,7 @@ import {
   Crosshair, Timer, Monitor, Activity, BatteryCharging, Shuffle, LogIn, LogOut, Cloud
 } from "lucide-react";
 
-// --- 1. DATABASE CONNECTION (INLINED) ---
-// We create the connection right here so we don't need a separate file
+// --- 1. DATABASE CONNECTION ---
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -55,7 +54,7 @@ export default function KovaaksTracker() {
     checkUser();
 
     const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-       setUser(session?.user ?? null);
+      setUser(session?.user ?? null);
     });
 
     return () => {
@@ -70,632 +69,388 @@ export default function KovaaksTracker() {
   };
 
   const handleSignUp = async () => {
-    const { error } = await supabase.auth.signUp({ email, password });
+    // We sign up with metadata (username) if we want, but simple email is fine for now
+    const { error } = await supabase.auth.signUp({ 
+      email, 
+      password,
+      options: {
+        // This helps the database trigger we made earlier find a username
+        data: { username: email.split('@')[0] } 
+      }
+    });
     if (error) alert(error.message);
-    else alert("Check your email for the confirmation link!");
+    else {
+      alert("Account created! You are now logged in.");
+      setShowLogin(false);
+    }
   };
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
   };
 
-  // --- 4. CLOUD SYNC LOGIC ---
-  const handleSyncToCloud = async () => {
-    if (!user) return alert("You must be logged in to sync.");
-    if (Object.keys(stats).length === 0) return alert("No stats to sync.");
+  // --- 4. DATA SYNC LOGIC (NEW FEATURE) ---
+  const handleSync = async () => {
+    if (!user) return alert("Please log in to sync stats.");
+    if (_.isEmpty(stats)) return alert("No stats to sync! Upload some CSV files first.");
 
     setIsSyncing(true);
     
-    // Convert our stats object into a flat list for the database
-    const allStats = Object.values(stats).flat().map(s => ({
-       user_id: user.id,
-       scenario: s.scenario,
-       score: s.score,
-       accuracy: s.accuracy,
-       ttk: s.ttk,
-       fps: s.fps,
-       fatigue: s.fatigue,
-       played_at: s.date
-    }));
+    // Flatten the 'stats' object into a single array of rows for the database
+    const scoresToUpload: any[] = [];
+    
+    Object.values(stats).forEach((scenarioRuns) => {
+      scenarioRuns.forEach((run) => {
+        scoresToUpload.push({
+          user_id: user.id,
+          scenario: run.scenario,
+          score: run.score,
+          accuracy: run.accuracy,
+          ttk: run.ttk,
+          fps: run.fps,
+          fatigue: run.fatigue,
+          // Ensure we have a valid date, or use 'now'
+          played_at: run.date && !isNaN(Date.parse(run.date)) ? run.date : new Date().toISOString()
+        });
+      });
+    });
 
-    const BATCH_SIZE = 100;
-    let errorCount = 0;
-
-    for (let i = 0; i < allStats.length; i += BATCH_SIZE) {
-        const batch = allStats.slice(i, i + BATCH_SIZE);
-        const { error } = await supabase.from('scores').insert(batch);
-        if (error) {
-            console.error("Sync error:", error);
-            errorCount++;
-        }
+    // Send to Supabase
+    const { error } = await supabase.from('scores').insert(scoresToUpload);
+    
+    if (error) {
+      console.error(error);
+      alert("Sync failed: " + error.message);
+    } else {
+      alert(`Success! Synced ${scoresToUpload.length} scores to the cloud.`);
     }
-
+    
     setIsSyncing(false);
-    if (errorCount === 0) alert("Successfully synced all stats to the cloud!");
-    else alert(`Sync finished with some errors. Check console.`);
   };
 
-  // --- 5. PARSING LOGIC ---
-  const parseFileName = (fileName: string) => {
-    const cleanName = fileName.replace(".csv", "").replace(" Stats", "");
-    const parts = cleanName.split(" - ");
-    const dateRaw = parts[parts.length - 1];
-    const scenario = parts[0].trim();
-    return { scenario, dateRaw };
-  };
-
-  const calculateAverage = (values: number[]) => {
-    if (values.length === 0) return 0;
-    const sum = values.reduce((a, b) => a + b, 0);
-    return sum / values.length;
-  };
-
-  const timeToSeconds = (timeStr: string) => {
-    if (!timeStr) return 0;
-    const parts = timeStr.split(":");
-    if (parts.length < 3) return 0;
-    const hours = parseFloat(parts[0]);
-    const minutes = parseFloat(parts[1]);
-    const seconds = parseFloat(parts[2]);
-    return (hours * 3600) + (minutes * 60) + seconds;
-  };
-
-  const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
+  // --- 5. FILE PARSING LOGIC ---
+  const processFiles = (files: File[]) => {
     setIsProcessing(true);
-
-    const files = Array.from(e.dataTransfer.files);
-    const validFiles = files.filter((f) => f.name.endsWith(".csv"));
-    const newStats: KovaaksDataPoint[] = [];
+    const results: ParsedResults = {};
     let processedCount = 0;
 
-    if (validFiles.length === 0) {
-      setIsProcessing(false);
-      return;
-    }
+    files.forEach(file => {
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (result) => {
+          result.data.forEach((row: any) => {
+            const scenario = row['Scenario Name'];
+            if (!scenario) return;
 
-    validFiles.forEach((file) => {
-      const { scenario, dateRaw } = parseFileName(file.name);
-      const formattedDate = dateRaw.replace(/\./g, "-").replace("-", "T").replace(/\./g, ":");
+            if (!results[scenario]) results[scenario] = [];
 
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const text = event.target?.result as string;
-        let fps = 0;
-        
-        const footer = text.slice(-500); 
-        const fpsMatch = footer.match(/Avg FPS:?,?(\d+\.?\d*)/i);
-        if (fpsMatch && fpsMatch[1]) {
-            fps = parseFloat(fpsMatch[1]);
+            results[scenario].push({
+              id: Math.random().toString(36).substr(2, 9),
+              date: row['Date and Time'] || new Date().toISOString(),
+              score: parseFloat(row['Score']) || 0,
+              scenario: scenario,
+              accuracy: parseFloat(row['Accuracy']) || 0,
+              ttk: parseFloat(row['Time To Kill']) || 0,
+              fps: parseFloat(row['Avg FPS']) || 0,
+              fatigue: 0 
+            });
+          });
+
+          processedCount++;
+          if (processedCount === files.length) {
+            // Sort by date
+            Object.keys(results).forEach(key => {
+              results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+            });
+            setStats(prev => ({ ...prev, ...results }));
+            setIsProcessing(false);
+          }
         }
-
-        Papa.parse(file, {
-            header: false,
-            skipEmptyLines: true,
-            complete: (results: any) => {
-              const rows = results.data as string[][];
-              if (rows.length > 0) {
-                let score = 0;
-                let avgAcc = 0;
-                let avgTTK = 0;
-                let fatigueIndex = 0;
-                let dataFound = false;
-
-                let headerIndex = -1;
-                for (let i = 0; i < Math.min(rows.length, 25); i++) {
-                  const rowStr = rows[i].join(",").toLowerCase();
-                  if (rowStr.includes("kill #") || rowStr.includes("kill#")) {
-                    headerIndex = i;
-                    break;
-                  }
-                }
-
-                if (headerIndex !== -1) {
-                  const header = rows[headerIndex].map(c => c.trim().toLowerCase());
-                  
-                  const dmgIdx = header.findIndex(c => c === "damage done");
-                  const accIdx = header.findIndex(c => c === "accuracy");
-                  const ttkIdx = header.findIndex(c => c === "ttk");
-                  const timeIdx = header.findIndex(c => c === "timestamp");
-                  
-                  const accValues: number[] = [];
-                  const ttkValues: number[] = [];
-                  const killTimes: number[] = [];
-                  let totalScore = 0;
-
-                  for (let i = headerIndex + 1; i < rows.length; i++) {
-                    const row = rows[i];
-                    if (!row[0] || row[0].includes(":")) break; 
-
-                    if (dmgIdx !== -1) {
-                        const val = parseFloat(row[dmgIdx]);
-                        if (!isNaN(val)) totalScore += val;
-                    }
-                    if (accIdx !== -1) {
-                        const val = parseFloat(row[accIdx]);
-                        if (!isNaN(val)) accValues.push(val);
-                    }
-                    if (ttkIdx !== -1) {
-                        const valStr = row[ttkIdx].replace("s", "");
-                        const val = parseFloat(valStr);
-                        if (!isNaN(val)) ttkValues.push(val);
-                    }
-                    if (timeIdx !== -1) {
-                        const seconds = timeToSeconds(row[timeIdx]);
-                        if (seconds > 0) killTimes.push(seconds);
-                    }
-                  }
-
-                  score = totalScore;
-                  avgAcc = calculateAverage(accValues) * 100;
-                  avgTTK = calculateAverage(ttkValues);
-
-                  if (killTimes.length > 4) {
-                      const start = killTimes[0];
-                      const end = killTimes[killTimes.length - 1];
-                      const duration = end - start;
-                      
-                      if (duration > 10) {
-                          const midPoint = start + (duration / 2);
-                          let firstHalfKills = 0;
-                          let secondHalfKills = 0;
-
-                          killTimes.forEach(t => {
-                              if (t <= midPoint) firstHalfKills++;
-                              else secondHalfKills++;
-                          });
-
-                          if (firstHalfKills > 0) {
-                              fatigueIndex = (secondHalfKills / firstHalfKills) * 100;
-                          }
-                      }
-                  }
-                  dataFound = true;
-                }
-
-                if (dataFound) {
-                  newStats.push({
-                    id: Math.random().toString(36).substr(2, 9),
-                    date: formattedDate,
-                    score: score,
-                    accuracy: avgAcc,
-                    ttk: avgTTK,
-                    fps: fps, 
-                    fatigue: fatigueIndex,
-                    scenario: scenario,
-                  });
-                }
-              }
-              processedCount++;
-              if (processedCount === validFiles.length) {
-                processAndSaveStats(newStats);
-              }
-            }
-        });
-      };
-      reader.readAsText(file);
+      });
     });
+  };
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
+    if (files.length > 0) processFiles(files);
   }, []);
 
-  const processAndSaveStats = (newData: KovaaksDataPoint[]) => {
-    setStats((prevStats) => {
-      const combined = [...Object.values(prevStats).flat(), ...newData];
-      const grouped = _.groupBy(combined, "scenario");
-      Object.keys(grouped).forEach((key) => {
-        grouped[key] = grouped[key].sort((a, b) => a.date.localeCompare(b.date));
-      });
-      return grouped;
-    });
-    setIsProcessing(false);
-  };
-
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-  };
-
-  const sortedScenarios = useMemo(() => {
-    return Object.keys(stats).sort((a, b) => stats[b].length - stats[a].length);
-  }, [stats]);
-
-  useMemo(() => {
-    if (!selectedScenario && sortedScenarios.length > 0) {
-      setSelectedScenario(sortedScenarios[0]);
-    }
-  }, [sortedScenarios, selectedScenario]);
-
-  const currentScenarioData = useMemo(() => {
+  // --- 6. RENDER HELPERS ---
+  const chartData = useMemo(() => {
     if (!selectedScenario || !stats[selectedScenario]) return [];
-    return stats[selectedScenario];
+    return stats[selectedScenario].map(pt => ({
+      ...pt,
+      formattedDate: new Date(pt.date).toLocaleDateString()
+    }));
   }, [stats, selectedScenario]);
 
-  const personalBests = useMemo(() => {
-    return [...currentScenarioData]
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
-  }, [currentScenarioData]);
-
-  const avgStamina = useMemo(() => {
-    const validRuns = currentScenarioData.filter(s => s.fatigue > 0);
-    if (validRuns.length === 0) return 0;
-    return calculateAverage(validRuns.map(s => s.fatigue));
-  }, [currentScenarioData]);
-
-  const getMetricColor = () => {
-    switch (currentMetric) {
-        case 'accuracy': return '#10b981';
-        case 'ttk': return '#f59e0b';
-        case 'fps': return '#8b5cf6';
-        case 'fatigue': return '#ef4444';
-        case 'correlation': return '#ec4899';
-        default: return '#3b82f6';
-    }
-  };
-
-  const getMetricLabel = (key: string) => {
-      if (key === 'score') return 'Score';
-      if (key === 'accuracy') return 'Accuracy %';
-      if (key === 'ttk') return 'Avg TTK (s)';
-      if (key === 'fps') return 'Avg FPS';
-      if (key === 'fatigue') return 'Stamina %';
-      return '';
-  };
-
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-200 font-sans selection:bg-indigo-500/30">
-      <div className="max-w-7xl mx-auto p-6 space-y-8">
-        
-        {/* Header & Auth */}
-        <header className="flex items-center justify-between pb-6 border-b border-neutral-800">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-indigo-600 rounded-lg">
-              <TrendingUp className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-white">KovaaK's Analytics</h1>
-              <p className="text-neutral-500 text-sm">V2 • Cloud Sync</p>
-            </div>
+    <div className="min-h-screen bg-neutral-950 text-white font-sans selection:bg-yellow-500/30">
+      
+      {/* NAVBAR */}
+      <nav className="border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-sm sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="w-6 h-6 text-yellow-500" />
+            <span className="font-bold text-xl tracking-tight">KOVA<span className="text-yellow-500">AKS</span>.PRO</span>
           </div>
-
-          <div className="flex gap-4">
-             {user ? (
-                 <div className="flex items-center gap-4">
-                     <span className="text-sm text-neutral-400">Logged in as {user.email}</span>
-                     
-                     {Object.keys(stats).length > 0 && (
-                        <button 
-                            onClick={handleSyncToCloud}
-                            disabled={isSyncing}
-                            className={`flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition-colors ${isSyncing ? 'opacity-50' : ''}`}
-                        >
-                            <Cloud className="w-4 h-4" /> {isSyncing ? 'Syncing...' : 'Sync to Cloud'}
-                        </button>
-                     )}
-
-                     <button onClick={handleLogout} className="flex items-center gap-2 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white rounded-lg text-sm font-medium transition-colors">
-                        <LogOut className="w-4 h-4" /> Logout
-                     </button>
-                 </div>
-             ) : (
-                <button onClick={() => setShowLogin(!showLogin)} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors">
-                    <LogIn className="w-4 h-4" /> Login / Signup
+          <div className="flex items-center gap-4">
+             {/* Admin Link (Only visible if you know it exists, or we can hide it conditionally) */}
+            {user && (
+                 <a href="/admin" className="text-sm text-neutral-400 hover:text-white transition-colors">Admin Panel</a>
+            )}
+            
+            {user ? (
+              <div className="flex items-center gap-4">
+                <span className="text-sm text-neutral-400 hidden md:block">
+                  {user.email}
+                </span>
+                <button 
+                  onClick={handleLogout}
+                  className="p-2 hover:bg-neutral-800 rounded-full transition-colors"
+                  title="Logout"
+                >
+                  <LogOut className="w-5 h-5 text-red-400" />
                 </button>
-             )}
-          </div>
-        </header>
-
-        {/* Login Modal */}
-        {showLogin && (
-            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-                <div className="bg-neutral-900 border border-neutral-700 p-8 rounded-xl w-96 space-y-4">
-                    <h2 className="text-xl font-bold text-white mb-4">Account Access</h2>
-                    <input 
-                        type="email" 
-                        placeholder="Email" 
-                        className="w-full bg-neutral-950 border border-neutral-800 p-3 rounded text-white"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                    />
-                     <input 
-                        type="password" 
-                        placeholder="Password" 
-                        className="w-full bg-neutral-950 border border-neutral-800 p-3 rounded text-white"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                    />
-                    <div className="flex gap-2 pt-2">
-                        <button onClick={handleLogin} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white p-2 rounded">Log In</button>
-                        <button onClick={handleSignUp} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-2 rounded">Sign Up</button>
-                    </div>
-                    <button onClick={() => setShowLogin(false)} className="w-full text-center text-xs text-neutral-500 hover:text-white mt-2">Close</button>
-                </div>
-            </div>
-        )}
-
-        {/* Drop Zone */}
-        <div
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          className={`
-            relative group cursor-pointer border-2 border-dashed rounded-2xl p-10 text-center transition-all duration-300
-            ${isProcessing 
-              ? "border-indigo-500 bg-indigo-500/5" 
-              : "border-neutral-800 hover:border-indigo-500 hover:bg-neutral-900"
-            }
-          `}
-        >
-          <div className="flex flex-col items-center gap-4">
-            <div className={`p-4 rounded-full bg-neutral-900 group-hover:bg-indigo-500/10 transition-colors`}>
-              <UploadCloud className={`w-8 h-8 ${isProcessing ? 'text-indigo-400 animate-bounce' : 'text-neutral-400 group-hover:text-indigo-400'}`} />
-            </div>
-            <div>
-              <p className="text-lg font-medium text-white">
-                {isProcessing ? "Processing Metrics..." : "Drop Detailed Stats CSVs"}
-              </p>
-              <p className="text-sm text-neutral-500 mt-1">
-                Reads <span className="text-blue-400">Score</span>, <span className="text-emerald-400">Acc</span>, <span className="text-amber-400">TTK</span>, <span className="text-red-400">Stamina</span>, and <span className="text-violet-400">FPS</span>.
-              </p>
-            </div>
+              </div>
+            ) : (
+              <button 
+                onClick={() => setShowLogin(true)}
+                className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 px-4 py-2 rounded-lg text-sm font-medium transition-all"
+              >
+                <LogIn className="w-4 h-4" />
+                Login / Signup
+              </button>
+            )}
           </div>
         </div>
+      </nav>
 
-        {/* Main Dashboard */}
-        {Object.keys(stats).length > 0 && (
-          <div className="grid grid-cols-12 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+        
+        {/* HERO / UPLOAD SECTION */}
+        <section className="relative group rounded-2xl border-2 border-dashed border-neutral-800 bg-neutral-900/20 hover:border-yellow-500/50 transition-all duration-300">
+          <div 
+            onDrop={onDrop}
+            onDragOver={(e) => e.preventDefault()}
+            className="p-12 text-center space-y-4 cursor-pointer"
+          >
+            <div className="w-16 h-16 bg-neutral-800 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
+              <UploadCloud className="w-8 h-8 text-yellow-500" />
+            </div>
+            <h2 className="text-2xl font-bold">Drop KovaaKs CSVs Here</h2>
+            <p className="text-neutral-400 max-w-md mx-auto">
+              Drag and drop your stats folder. We analyze Score, Accuracy, TTK, and Fatigue locally.
+            </p>
+            {isProcessing && (
+              <div className="text-yellow-500 font-mono animate-pulse">
+                Processing {Object.keys(stats).length} scenarios...
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* --- NEW SYNC BUTTON SECTION --- */}
+        {!_.isEmpty(stats) && (
+          <div className="flex justify-center -mt-4 animate-in fade-in slide-in-from-top-4">
+            <button
+              onClick={handleSync}
+              disabled={isSyncing || !user}
+              className={`flex items-center gap-3 px-8 py-3 rounded-xl font-bold shadow-lg transition-all transform hover:scale-105 ${
+                user 
+                  ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-900/20" 
+                  : "bg-neutral-800 text-neutral-500 cursor-not-allowed"
+              }`}
+            >
+              <Cloud className="w-5 h-5" />
+              {isSyncing ? "Syncing..." : user ? "Sync Stats to Cloud" : "Login to Sync Stats"}
+            </button>
+          </div>
+        )}
+
+        {/* ANALYTICS DASHBOARD */}
+        {!_.isEmpty(stats) && (
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-8 animate-in fade-in slide-in-from-bottom-8 duration-700">
             
-            {/* Sidebar */}
-            <div className="col-span-3 bg-neutral-900/50 border border-neutral-800 rounded-xl flex flex-col h-[600px]">
-              <div className="p-4 border-b border-neutral-800 flex items-center gap-2">
-                <FileText className="w-4 h-4 text-neutral-500" />
-                <span className="font-semibold text-neutral-300">Scenarios</span>
-                <span className="ml-auto text-xs bg-neutral-800 px-2 py-0.5 rounded-full text-neutral-400">
-                  {Object.keys(stats).length}
-                </span>
+            {/* SIDEBAR: Scenario List */}
+            <aside className="lg:col-span-1 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden h-[600px] flex flex-col">
+              <div className="p-4 border-b border-neutral-800 bg-neutral-900">
+                <h3 className="font-bold flex items-center gap-2">
+                  <Crosshair className="w-4 h-4 text-yellow-500" />
+                  Scenarios ({Object.keys(stats).length})
+                </h3>
               </div>
               <div className="overflow-y-auto flex-1 p-2 space-y-1 custom-scrollbar">
-                {sortedScenarios.map((scen) => (
+                {Object.keys(stats).map(name => (
                   <button
-                    key={scen}
-                    onClick={() => setSelectedScenario(scen)}
-                    className={`
-                      w-full text-left px-3 py-2.5 rounded-lg text-sm truncate transition-all flex justify-between items-center group
-                      ${selectedScenario === scen
-                        ? "bg-indigo-600 text-white shadow-lg shadow-indigo-900/20 font-medium"
-                        : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
-                      }
-                    `}
+                    key={name}
+                    onClick={() => setSelectedScenario(name)}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-sm truncate transition-colors ${
+                      selectedScenario === name 
+                        ? 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20' 
+                        : 'text-neutral-400 hover:bg-neutral-800 hover:text-white'
+                    }`}
                   >
-                    <span className="truncate">{scen}</span>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-                      selectedScenario === scen ? 'bg-indigo-500 text-white' : 'bg-neutral-800 text-neutral-500 group-hover:bg-neutral-700'
-                    }`}>
-                      {stats[scen].length}
-                    </span>
+                    {name}
                   </button>
                 ))}
               </div>
-            </div>
+            </aside>
 
-            {/* Content Area */}
-            <div className="col-span-9 space-y-6">
-              
-              {/* Metric Selector Tabs */}
-              <div className="flex flex-wrap gap-2 p-1 bg-neutral-900/50 border border-neutral-800 rounded-xl w-fit">
-                 <button 
-                   onClick={() => setCurrentMetric('score')}
-                   className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${currentMetric === 'score' ? 'bg-blue-600 text-white shadow-lg' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`}
-                 >
-                   <Trophy className="w-4 h-4" /> Score
-                 </button>
-                 <button 
-                   onClick={() => setCurrentMetric('accuracy')}
-                   className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${currentMetric === 'accuracy' ? 'bg-emerald-600 text-white shadow-lg' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`}
-                 >
-                   <Crosshair className="w-4 h-4" /> Accuracy
-                 </button>
-                 <button 
-                   onClick={() => setCurrentMetric('ttk')}
-                   className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${currentMetric === 'ttk' ? 'bg-amber-600 text-white shadow-lg' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`}
-                 >
-                   <Timer className="w-4 h-4" /> TTK
-                 </button>
-                 <button 
-                   onClick={() => setCurrentMetric('fps')}
-                   className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${currentMetric === 'fps' ? 'bg-violet-600 text-white shadow-lg' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`}
-                 >
-                   <Monitor className="w-4 h-4" /> FPS
-                 </button>
-                 <button 
-                   onClick={() => setCurrentMetric('fatigue')}
-                   className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${currentMetric === 'fatigue' ? 'bg-red-600 text-white shadow-lg' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`}
-                 >
-                   <BatteryCharging className="w-4 h-4" /> Stamina
-                 </button>
-                 <button 
-                   onClick={() => setCurrentMetric('correlation')}
-                   className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${currentMetric === 'correlation' ? 'bg-pink-600 text-white shadow-lg' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'}`}
-                 >
-                   <Shuffle className="w-4 h-4" /> Acc vs Speed
-                 </button>
-              </div>
+            {/* MAIN CHART AREA */}
+            <section className="lg:col-span-3 space-y-6">
+              {selectedScenario ? (
+                <>
+                  {/* KPI CARDS */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <MetricCard 
+                      label="High Score" 
+                      value={Math.max(...stats[selectedScenario].map(s => s.score)).toLocaleString()} 
+                      icon={<Trophy className="w-4 h-4 text-yellow-500" />} 
+                    />
+                    <MetricCard 
+                      label="Avg Accuracy" 
+                      value={(_.meanBy(stats[selectedScenario], 'accuracy') * 100).toFixed(1) + '%'} 
+                      icon={<Activity className="w-4 h-4 text-blue-500" />} 
+                    />
+                    <MetricCard 
+                      label="Total Runs" 
+                      value={stats[selectedScenario].length} 
+                      icon={<FileText className="w-4 h-4 text-purple-500" />} 
+                    />
+                    <MetricCard 
+                      label="Improvement" 
+                      value={'+' + ((stats[selectedScenario][stats[selectedScenario].length-1].score - stats[selectedScenario][0].score) / stats[selectedScenario][0].score * 100).toFixed(1) + '%'} 
+                      icon={<TrendingUp className="w-4 h-4 text-emerald-500" />} 
+                    />
+                  </div>
 
-              {/* Chart */}
-              <div className="bg-neutral-900/50 border border-neutral-800 rounded-xl p-6 h-[400px]">
-                {selectedScenario ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      {currentMetric === 'correlation' ? (
-                        <ScatterChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#262626" />
-                          <XAxis 
-                            type="number" 
-                            dataKey="accuracy" 
-                            name="Accuracy" 
-                            unit="%" 
-                            stroke="#737373"
-                            domain={['auto', 'auto']}
+                  {/* CHART CONTAINER */}
+                  <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 h-[400px]">
+                    <div className="flex justify-between items-center mb-6">
+                      <h3 className="font-bold text-lg">{selectedScenario} Progress</h3>
+                      <div className="flex gap-2 bg-neutral-950 p-1 rounded-lg border border-neutral-800">
+                        {(['score', 'accuracy', 'fps'] as const).map(m => (
+                          <button
+                            key={m}
+                            onClick={() => setCurrentMetric(m)}
+                            className={`px-3 py-1 rounded text-xs font-bold uppercase ${
+                              currentMetric === m ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300'
+                            }`}
                           >
-                             <Label value="Accuracy (%)" offset={0} position="insideBottom" fill="#737373" />
-                          </XAxis>
-                          <YAxis 
-                            type="number" 
-                            dataKey="ttk" 
-                            name="TTK" 
-                            unit="s" 
-                            stroke="#737373"
-                            domain={['auto', 'auto']}
-                          >
-                             <Label value="TTK (s)" angle={-90} position="insideLeft" fill="#737373" />
-                          </YAxis>
-                          <Tooltip 
-                            cursor={{ strokeDasharray: '3 3' }}
-                            contentStyle={{ backgroundColor: "#171717", border: "1px solid #262626", borderRadius: "8px" }}
-                            itemStyle={{ color: "#e5e5e5" }}
-                            labelStyle={{ display: "none" }}
-                            formatter={(value: any, name: any, props: any) => {
-                                if (name === "TTK") return [`${value.toFixed(3)}s`, "TTK"];
-                                if (name === "Accuracy") return [`${value.toFixed(1)}%`, "Accuracy"];
-                                return [value, name];
-                            }}
-                          />
-                          <Scatter 
-                            name="Runs" 
-                            data={currentScenarioData} 
-                            fill="#ec4899" 
-                          />
-                        </ScatterChart>
-                      ) : (
-                        <LineChart data={currentScenarioData}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#262626" vertical={false} />
-                          <XAxis dataKey="date" hide />
-                          {currentMetric === 'fatigue' && (
-                             <ReferenceLine y={100} stroke="#404040" strokeDasharray="3 3" label={{ position: 'top', value: 'Perfect Pacing', fill: '#666', fontSize: 10 }} />
-                          )}
-                          <YAxis 
-                              stroke="#525252" 
-                              domain={['auto', 'auto']} 
-                              width={40} 
-                              tick={{fontSize: 12}} 
-                              tickFormatter={(val) => val.toLocaleString()}
-                          />
-                          <Tooltip 
-                            contentStyle={{ backgroundColor: "#171717", border: "1px solid #262626", borderRadius: "8px" }}
-                            itemStyle={{ color: "#e5e5e5" }}
-                            labelStyle={{ display: "none" }}
-                            formatter={(value: any) => [
-                                typeof value === 'number' ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : value, 
-                                getMetricLabel(currentMetric)
-                            ]}
-                          />
-                          <Line
-                            type="monotone"
-                            dataKey={currentMetric}
-                            stroke={getMetricColor()}
-                            strokeWidth={2}
-                            dot={false}
-                            activeDot={{ r: 6, strokeWidth: 0 }}
-                            animationDuration={500}
-                          />
-                        </LineChart>
-                      )}
-                    </ResponsiveContainer>
-                ) : (
-                  <div className="h-full flex items-center justify-center text-neutral-600">
-                    Select a scenario to view data
-                  </div>
-                )}
-              </div>
-
-              {/* Stats Summary */}
-              {selectedScenario && (
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                  <div className="bg-neutral-900/50 border border-neutral-800 p-4 rounded-xl">
-                     <div className="flex items-center gap-2 mb-2 text-neutral-400">
-                       <Crosshair className="w-4 h-4" />
-                       <span className="text-xs font-bold uppercase tracking-wider">Avg Acc</span>
-                     </div>
-                     <p className="text-xl md:text-2xl font-mono font-bold text-white">
-                       {calculateAverage(currentScenarioData.map(s => s.accuracy)).toFixed(1)}%
-                     </p>
-                  </div>
-                  <div className="bg-neutral-900/50 border border-neutral-800 p-4 rounded-xl">
-                     <div className="flex items-center gap-2 mb-2 text-neutral-400">
-                       <Timer className="w-4 h-4" />
-                       <span className="text-xs font-bold uppercase tracking-wider">Avg TTK</span>
-                     </div>
-                     <p className="text-xl md:text-2xl font-mono font-bold text-white">
-                       {calculateAverage(currentScenarioData.map(s => s.ttk)).toFixed(3)}s
-                     </p>
-                  </div>
-                  <div className="bg-neutral-900/50 border border-neutral-800 p-4 rounded-xl">
-                     <div className="flex items-center gap-2 mb-2 text-neutral-400">
-                       <BatteryCharging className="w-4 h-4" />
-                       <span className="text-xs font-bold uppercase tracking-wider">Stamina</span>
-                     </div>
-                     <div className="flex items-end gap-2">
-                        <p className={`text-xl md:text-2xl font-mono font-bold ${avgStamina >= 95 ? 'text-emerald-400' : avgStamina >= 85 ? 'text-yellow-400' : 'text-red-400'}`}>
-                           {avgStamina.toFixed(0)}%
-                        </p>
-                     </div>
-                  </div>
-                  <div className="bg-neutral-900/50 border border-neutral-800 p-4 rounded-xl">
-                     <div className="flex items-center gap-2 mb-2 text-neutral-400">
-                       <Monitor className="w-4 h-4" />
-                       <span className="text-xs font-bold uppercase tracking-wider">Avg FPS</span>
-                     </div>
-                     <p className="text-xl md:text-2xl font-mono font-bold text-white">
-                       {Math.round(calculateAverage(currentScenarioData.map(s => s.fps)))}
-                     </p>
-                  </div>
-                   <div className="bg-neutral-900/50 border border-neutral-800 p-4 rounded-xl">
-                     <div className="flex items-center gap-2 mb-2 text-neutral-400">
-                       <Activity className="w-4 h-4" />
-                       <span className="text-xs font-bold uppercase tracking-wider">Total Runs</span>
-                     </div>
-                     <p className="text-xl md:text-2xl font-mono font-bold text-white">
-                       {currentScenarioData.length}
-                     </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Personal Bests Table (Always shows Score PBs) */}
-              {selectedScenario && (
-                <div className="bg-neutral-900/50 border border-neutral-800 rounded-xl p-6">
-                  <div className="flex items-center gap-2 mb-4">
-                    <Trophy className="w-4 h-4 text-yellow-500" />
-                    <h4 className="text-sm font-bold text-neutral-300 uppercase tracking-wider">Top 5 Records (By Score)</h4>
-                  </div>
-                  <div className="space-y-2">
-                    {personalBests.map((run, idx) => (
-                      <div key={run.id} className="flex justify-between items-center bg-neutral-950/50 px-4 py-3 rounded-lg border border-neutral-800/50 hover:border-neutral-700 transition-colors">
-                        <div className="flex items-center gap-4">
-                          <span className={`text-xs font-bold w-6 h-6 flex items-center justify-center rounded ${
-                            idx === 0 ? 'bg-yellow-500/20 text-yellow-500' : 'bg-neutral-800 text-neutral-600'
-                          }`}>
-                            #{idx + 1}
-                          </span>
-                          <span className="text-neutral-400 text-sm font-mono">
-                             {run.date.split("T")[0]}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-6">
-                            <span className="text-xs text-neutral-500 font-mono hidden md:block">
-                                {run.accuracy.toFixed(1)}% Acc
-                            </span>
-                             <span className={`text-xs font-mono hidden md:block ${run.fatigue < 90 ? 'text-red-400' : 'text-emerald-400'}`}>
-                                {run.fatigue > 0 ? `${run.fatigue.toFixed(0)}% Stm` : '-'}
-                            </span>
-                            <span className="font-mono text-white font-bold w-20 text-right">{run.score.toLocaleString()}</span>
-                        </div>
+                            {m}
+                          </button>
+                        ))}
                       </div>
-                    ))}
+                    </div>
+                    
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={chartData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#262626" vertical={false} />
+                        <XAxis 
+                          dataKey="formattedDate" 
+                          stroke="#525252" 
+                          tick={{fontSize: 12}} 
+                          tickMargin={10} 
+                        />
+                        <YAxis 
+                          stroke="#525252" 
+                          tick={{fontSize: 12}} 
+                          domain={['auto', 'auto']}
+                        />
+                        <Tooltip 
+                          contentStyle={{backgroundColor: '#171717', border: '1px solid #404040', borderRadius: '8px'}}
+                          itemStyle={{color: '#fff'}}
+                        />
+                        <Line 
+                          type="monotone" 
+                          dataKey={currentMetric} 
+                          stroke="#eab308" 
+                          strokeWidth={2} 
+                          dot={{r: 3, fill: '#eab308'}} 
+                          activeDot={{r: 6, fill: '#fff'}} 
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
                   </div>
+                </>
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-neutral-500 border border-neutral-800 rounded-xl bg-neutral-900/50">
+                  <Crosshair className="w-12 h-12 mb-4 opacity-20" />
+                  <p>Select a scenario from the sidebar to view analysis</p>
                 </div>
               )}
-            </div>
+            </section>
           </div>
         )}
+      </main>
+
+      {/* LOGIN MODAL */}
+      {showLogin && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 w-full max-w-md shadow-2xl">
+            <h2 className="text-2xl font-bold mb-6 text-center">Account Access</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-neutral-400 mb-1">Email</label>
+                <input 
+                  type="email" 
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-3 focus:border-yellow-500 outline-none transition-colors"
+                  placeholder="name@example.com"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-neutral-400 mb-1">Password</label>
+                <input 
+                  type="password" 
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-3 focus:border-yellow-500 outline-none transition-colors"
+                  placeholder="••••••••"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button 
+                  onClick={handleLogin}
+                  className="bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-bold transition-colors"
+                >
+                  Log In
+                </button>
+                <button 
+                  onClick={handleSignUp}
+                  className="bg-neutral-800 hover:bg-neutral-700 text-white py-3 rounded-lg font-bold transition-colors"
+                >
+                  Sign Up
+                </button>
+              </div>
+              <button 
+                onClick={() => setShowLogin(false)}
+                className="w-full text-neutral-500 text-sm hover:text-white mt-4"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+// Simple Subcomponent for KPI Cards
+function MetricCard({ label, value, icon }: { label: string, value: string | number, icon: React.ReactNode }) {
+  return (
+    <div className="bg-neutral-900 border border-neutral-800 p-4 rounded-xl flex flex-col justify-between hover:border-neutral-700 transition-colors">
+      <div className="text-neutral-500 text-xs font-bold uppercase tracking-wider mb-2 flex justify-between items-center">
+        {label}
+        {icon}
       </div>
+      <div className="text-2xl font-mono font-bold text-white">{value}</div>
     </div>
   );
 }
