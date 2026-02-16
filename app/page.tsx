@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import Papa from "papaparse";
 import _ from "lodash";
-import Link from "next/link"; // Added for Navigation
+import Link from "next/link"; 
 import { createClient } from "@supabase/supabase-js";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
@@ -127,8 +127,9 @@ export default function KovaaksTracker() {
     setIsSyncing(false);
   };
 
-  // --- 5. FILE PARSING LOGIC (FIXED) ---
+  // --- 5. FILE PARSING LOGIC (ROBUST VERSION) ---
   const processFiles = (files: File[]) => {
+    console.log(`Starting to process ${files.length} files...`);
     setIsProcessing(true);
     const results: ParsedResults = {};
     let processedCount = 0;
@@ -142,96 +143,108 @@ export default function KovaaksTracker() {
       Papa.parse(file, {
         header: false,
         skipEmptyLines: true,
+        error: (err) => {
+            console.error(`Error parsing ${file.name}:`, err);
+            // Even on error, we MUST increment the counter to avoid freezing
+            processedCount++;
+            if (processedCount === files.length) finalizeProcessing(results);
+        },
         complete: (result) => {
-          const rows = result.data as string[][];
-          if (!rows || rows.length === 0) {
-             processedCount++;
-             if (processedCount === files.length) finalizeProcessing(results);
-             return;
-          }
+          try {
+              const rows = result.data as string[][];
+              
+              // Skip empty files
+              if (!rows || rows.length === 0) {
+                 return; // Finally block will handle counter
+              }
 
-          // CLEANUP: Handle BOM (invisible character at start of file)
-          if (rows[0][0]) {
-             rows[0][0] = rows[0][0].replace(/^\uFEFF/, '');
-          }
+              // CLEANUP: Handle BOM (invisible character at start of file)
+              if (rows[0][0]) {
+                 rows[0][0] = rows[0][0].replace(/^\uFEFF/, '');
+              }
 
-          // STRATEGY: Look for Metadata Keys (Scenario, Score) anywhere in file
-          const dataMap: Record<string, string> = {};
-          rows.forEach(row => {
-            if (row.length >= 2) {
-              const rawKey = row[0]?.toString().trim();
-              // Normalize key: "Scenario:" -> "scenario"
-              const key = rawKey?.replace(':', '').toLowerCase();
-              const val = row[1]?.toString().trim();
-              if (key && val) dataMap[key] = val;
-            }
-          });
-
-          // Check if we found the Detailed Stats "Fingerprint"
-          if (dataMap['scenario'] && dataMap['score']) {
-            // --- TYPE A: DETAILED STATS ---
-            const scenario = dataMap['scenario'];
-            const score = parseFloat(dataMap['score']);
-            
-            let accuracy = 0;
-            const hits = parseInt(dataMap['hit count'] || '0');
-            const misses = parseInt(dataMap['miss count'] || '0');
-            if (hits + misses > 0) accuracy = hits / (hits + misses);
-
-            // DATE FIX: Handle "2025.11.03-20.05.18" safely
-            let date = new Date().toISOString();
-            const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2}).*?(\d{2}\.\d{2}\.\d{2})/);
-            
-            if (nameMatch) {
-               // nameMatch[1] = "2025.11.03", nameMatch[2] = "20.05.18"
-               const datePart = nameMatch[1].replace(/\./g, '-'); // 2025-11-03
-               const timePart = nameMatch[2].replace(/\./g, ':'); // 20:05:18
-               const isoString = `${datePart}T${timePart}`;       // 2025-11-03T20:05:18
-               if (!isNaN(Date.parse(isoString))) date = isoString;
-            }
-
-            if (scenario && !isNaN(score)) {
-              if (!results[scenario]) results[scenario] = [];
-              results[scenario].push({
-                id: Math.random().toString(36).substr(2, 9),
-                date: date,
-                score: score,
-                scenario: scenario,
-                accuracy: accuracy,
-                ttk: parseFloat(dataMap['avg ttk'] || '0'),
-                fps: parseFloat(dataMap['avg fps'] || '0'),
-                fatigue: 0 
-              });
-            }
-          } 
-          else if (rows[0][0] === 'Scenario Name') {
-             // --- TYPE B: SUMMARY STATS (Legacy) ---
-             const header = rows[0];
-             const iScenario = header.indexOf('Scenario Name');
-             const iScore = header.indexOf('Score');
-             const iDate = header.indexOf('Date and Time');
-             
-             for (let i = 1; i < rows.length; i++) {
-                const row = rows[i];
-                if (row[iScenario]) {
-                   const scenarioName = row[iScenario];
-                   if (!results[scenarioName]) results[scenarioName] = [];
-                   results[scenarioName].push({
-                      id: Math.random().toString(36).substr(2, 9),
-                      date: row[iDate] || new Date().toISOString(),
-                      score: parseFloat(row[iScore]) || 0,
-                      scenario: scenarioName,
-                      accuracy: parseFloat(row[header.indexOf('Accuracy')]) || 0,
-                      ttk: parseFloat(row[header.indexOf('Time To Kill')]) || 0,
-                      fps: parseFloat(row[header.indexOf('Avg FPS')]) || 0,
-                      fatigue: 0
-                   });
+              // STRATEGY: Look for Metadata Keys (Scenario, Score) anywhere in file
+              const dataMap: Record<string, string> = {};
+              rows.forEach(row => {
+                if (row.length >= 2) {
+                  const rawKey = row[0]?.toString().trim();
+                  // Normalize key: "Scenario:" -> "scenario"
+                  const key = rawKey?.replace(':', '').toLowerCase();
+                  const val = row[1]?.toString().trim();
+                  if (key && val) dataMap[key] = val;
                 }
-             }
-          }
+              });
 
-          processedCount++;
-          if (processedCount === files.length) finalizeProcessing(results);
+              // Check if we found the Detailed Stats "Fingerprint"
+              if (dataMap['scenario'] && dataMap['score']) {
+                // --- TYPE A: DETAILED STATS ---
+                const scenario = dataMap['scenario'];
+                const score = parseFloat(dataMap['score']);
+                
+                let accuracy = 0;
+                const hits = parseInt(dataMap['hit count'] || '0');
+                const misses = parseInt(dataMap['miss count'] || '0');
+                if (hits + misses > 0) accuracy = hits / (hits + misses);
+
+                // DATE FIX: Handle "2025.11.03-20.05.18" safely
+                let date = new Date().toISOString();
+                // Regex matches 2025.11.03 followed by something then 20.05.18
+                const nameMatch = file.name.match(/(\d{4}\.\d{2}\.\d{2}).*?(\d{2}\.\d{2}\.\d{2})/);
+                
+                if (nameMatch) {
+                   const datePart = nameMatch[1].replace(/\./g, '-'); // 2025-11-03
+                   const timePart = nameMatch[2].replace(/\./g, ':'); // 20:05:18
+                   const isoString = `${datePart}T${timePart}`;       // 2025-11-03T20:05:18
+                   if (!isNaN(Date.parse(isoString))) date = isoString;
+                }
+
+                if (scenario && !isNaN(score)) {
+                  if (!results[scenario]) results[scenario] = [];
+                  results[scenario].push({
+                    id: Math.random().toString(36).substr(2, 9),
+                    date: date,
+                    score: score,
+                    scenario: scenario,
+                    accuracy: accuracy,
+                    ttk: parseFloat(dataMap['avg ttk'] || '0'),
+                    fps: parseFloat(dataMap['avg fps'] || '0'),
+                    fatigue: 0 
+                  });
+                }
+              } 
+              else if (rows[0][0] === 'Scenario Name') {
+                 // --- TYPE B: SUMMARY STATS (Legacy) ---
+                 const header = rows[0];
+                 const iScenario = header.indexOf('Scenario Name');
+                 const iScore = header.indexOf('Score');
+                 const iDate = header.indexOf('Date and Time');
+                 
+                 for (let i = 1; i < rows.length; i++) {
+                    const row = rows[i];
+                    if (row[iScenario]) {
+                       const scenarioName = row[iScenario];
+                       if (!results[scenarioName]) results[scenarioName] = [];
+                       results[scenarioName].push({
+                          id: Math.random().toString(36).substr(2, 9),
+                          date: row[iDate] || new Date().toISOString(),
+                          score: parseFloat(row[iScore]) || 0,
+                          scenario: scenarioName,
+                          accuracy: parseFloat(row[header.indexOf('Accuracy')]) || 0,
+                          ttk: parseFloat(row[header.indexOf('Time To Kill')]) || 0,
+                          fps: parseFloat(row[header.indexOf('Avg FPS')]) || 0,
+                          fatigue: 0
+                       });
+                    }
+                 }
+              }
+          } catch (e) {
+              console.error("Error processing file content:", file.name, e);
+          } finally {
+              // ALWAYS increment counter, even if the logic above failed
+              processedCount++;
+              if (processedCount % 100 === 0) console.log(`Processed ${processedCount}/${files.length}`);
+              if (processedCount === files.length) finalizeProcessing(results);
+          }
         }
       });
     });
@@ -242,6 +255,7 @@ export default function KovaaksTracker() {
     Object.keys(results).forEach(key => {
         results[key].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     });
+    console.log("Parsed Stats Final:", results);
     setStats(prev => ({ ...prev, ...results }));
     setIsProcessing(false);
   };
@@ -257,7 +271,6 @@ export default function KovaaksTracker() {
     else alert("No CSV files found.");
   }, []);
 
-  // *** THIS IS THE FUNCTION THAT WAS MISSING ***
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
         const files = Array.from(e.target.files).filter(f => 
@@ -289,7 +302,7 @@ export default function KovaaksTracker() {
             <span className="font-bold text-xl tracking-tight">KOVA<span className="text-yellow-500">AKS</span>.PRO</span>
           </Link>
 
-          {/* NEW NAVIGATION LINKS */}
+          {/* NAVIGATION LINKS */}
           <div className="hidden md:flex items-center gap-6">
             <Link href="/" className="text-sm font-bold text-white border-b-2 border-yellow-500 pb-1">
               Dashboard
@@ -345,7 +358,7 @@ export default function KovaaksTracker() {
             multiple 
             accept=".csv" 
             ref={fileInputRef} 
-            onChange={handleFileSelect} // This now works!
+            onChange={handleFileSelect} 
             className="hidden" 
           />
 
@@ -365,7 +378,7 @@ export default function KovaaksTracker() {
             </p>
             {isProcessing && (
               <div className="text-yellow-500 font-mono animate-pulse">
-                Processing files...
+                Processing {fileInputRef.current?.files?.length || "files"}...
               </div>
             )}
           </div>
